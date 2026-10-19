@@ -1,0 +1,18 @@
+- name: Configure AutoHeal environment
+  hosts: local
+  gather_facts: false
+
+  tasks:
+    - name: Check that Docker is available
+      ansible.builtin.command: docker version
+      changed_when: false
+
+    - name: Verify AutoHeal web container is running
+      ansible.builtin.command: docker inspect --format={{ '{{' }}.State.Status{{ '}}' }} autoheal-web
+      register: web_status
+      changed_when: false
+      failed_when: web_status.stdout != "running"
+
+    - name: Display service status
+      ansible.builtin.debug:
+        msg: "AutoHeal web container is {{ web_status.stdout }}"

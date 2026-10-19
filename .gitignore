@@ -1,0 +1,9 @@
+.env
+*.tfstate
+*.tfstate.*
+.terraform/
+__pycache__/
+*.pyc
+logs/*
+!logs/.gitkeep
+.DS_Store

@@ -1,0 +1,20 @@
+- name: Manage AutoHeal Nginx
+  hosts: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate Nginx configuration
+      ansible.builtin.command: docker exec autoheal-web nginx -t
+      changed_when: false
+
+    - name: Verify health endpoint
+      ansible.builtin.uri:
+        url: http://web/health
+        status_code: 200
+        return_content: true
+      register: health_result
+      changed_when: false
+
+    - name: Display health status
+      ansible.builtin.debug:
+        msg: "Nginx health endpoint returned {{ health_result.status }}: {{ health_result.content | trim }}"

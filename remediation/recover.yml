@@ -1,0 +1,74 @@
+- name: AutoHeal recovery workflow
+  hosts: local
+  gather_facts: false
+
+  tasks:
+    - name: Check initial web health
+      ansible.builtin.uri:
+        url: http://web/health
+        status_code: 200
+        return_content: true
+      register: initial_health
+      failed_when: false
+      changed_when: false
+
+    - name: Inspect container state
+      ansible.builtin.command:
+        argv:
+          - docker
+          - inspect
+          - --format={{ '{{' }}.State.Status{{ '}}' }}
+          - autoheal-web
+      register: container_state
+      changed_when: false
+
+    - name: Restart running container if unhealthy
+      ansible.builtin.command:
+        argv: [docker, restart, autoheal-web]
+      when:
+        - initial_health.status | default(0) != 200
+        - container_state.stdout == "running"
+
+    - name: Start stopped container if unhealthy
+      ansible.builtin.command:
+        argv: [docker, start, autoheal-web]
+      when:
+        - initial_health.status | default(0) != 200
+        - container_state.stdout != "running"
+
+    - name: Wait for web health to recover
+      ansible.builtin.uri:
+        url: http://web/health
+        status_code: 200
+        return_content: true
+      register: recovery_check
+      until: recovery_check.status | default(0) == 200
+      retries: 10
+      delay: 3
+      failed_when: false
+      changed_when: false
+
+    - name: Determine recovery outcome
+      ansible.builtin.set_fact:
+        recovery_outcome: >-
+          {{ 'healthy' if (initial_health.status | default(0) == 200)
+             else ('recovered' if (recovery_check.status | default(0) == 200)
+             else 'failed') }}
+
+    - name: Append outcome to audit log
+      ansible.builtin.shell:
+        cmd: >-
+          printf '%s | %s | initial_status=%s | final_status=%s\n'
+          "$(date -u +%FT%TZ)"
+          "{{ recovery_outcome }}"
+          "{{ initial_health.status | default('unreachable') }}"
+          "{{ recovery_check.status | default('unreachable') }}"
+          >> /workspace/logs/remediation.log
+      changed_when: true
+
+    - name: Confirm recovery succeeded
+      ansible.builtin.assert:
+        that:
+          - recovery_check.status | default(0) == 200
+        success_msg: "AutoHeal verified that the web service is healthy."
+        fail_msg: "Recovery failed. Check the container and audit log."
