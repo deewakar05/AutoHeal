@@ -8,7 +8,7 @@ from pathlib import Path
 
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
 
-from .models import CheckOutcome, HealthCheckResult, ServiceState, StateEvaluation
+from .models import HealthCheckResult, ServiceState, StateEvaluation
 
 DURATION_BUCKETS: tuple[float, ...] = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0)
 
@@ -190,9 +190,4 @@ class MonitorMetrics:
             """,
             (metric_name, labels_json),
         )
-
-
-def all_known_outcomes() -> tuple[str, ...]:
-    """Return all health check outcome label strings."""
-    return tuple(item.value for item in CheckOutcome)
 

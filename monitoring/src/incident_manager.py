@@ -189,29 +189,22 @@ class IncidentManager:
 
                     if consecutive_failures >= self.failure_threshold:
                         new_state = ServiceState.UNHEALTHY
-                        if open_incident is None:
-                            incident_created = self._create_incident(
-                                conn,
-                                service_name=result.service_name,
-                                failure_reason=reason,
-                                timestamp_iso=checked_iso,
-                                initial_failures=consecutive_failures,
-                            )
-                            active_incident = incident_created
-                        else:
-                            active_incident = self._update_open_incident(
-                                conn,
-                                incident_id=open_incident.id,
-                                failure_reason=reason,
-                                timestamp_iso=checked_iso,
-                            )
-                    elif open_incident is not None:
+                    if open_incident is not None:
                         active_incident = self._update_open_incident(
                             conn,
                             incident_id=open_incident.id,
                             failure_reason=reason,
                             timestamp_iso=checked_iso,
                         )
+                    elif consecutive_failures >= self.failure_threshold:
+                        incident_created = self._create_incident(
+                            conn,
+                            service_name=result.service_name,
+                            failure_reason=reason,
+                            timestamp_iso=checked_iso,
+                            initial_failures=consecutive_failures,
+                        )
+                        active_incident = incident_created
 
                 state_changed = new_state != prev_state
                 if state_changed or last_change_dt is None:
@@ -280,32 +273,6 @@ class IncidentManager:
                     active_incident=active_incident,
                     status_record=status_record,
                 )
-        finally:
-            conn.close()
-
-    def get_service_status(self, service_name: str) -> ServiceStatusRecord | None:
-        """Retrieve current status record for a service."""
-        conn = self._connect()
-        try:
-            row = conn.execute(
-                "SELECT * FROM service_status WHERE service_name = ?",
-                (service_name,),
-            ).fetchone()
-            if row is None:
-                return None
-            return ServiceStatusRecord(
-                service_name=row["service_name"],
-                target_url=row["target_url"],
-                status=ServiceState(row["status"]),
-                consecutive_failures=int(row["consecutive_failures"]),
-                consecutive_successes=int(row["consecutive_successes"]),
-                last_checked_at=_parse_dt(row["last_checked_at"]),
-                last_status_change_at=_parse_dt(row["last_status_change_at"]),
-                last_http_status=row["last_http_status"],
-                last_response_time_ms=row["last_response_time_ms"],
-                last_error=row["last_error"],
-                active_incident_id=row["active_incident_id"],
-            )
         finally:
             conn.close()
 
