@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from functools import lru_cache
 from urllib.parse import urlparse
 
@@ -88,11 +87,4 @@ class MonitorSettings(BaseSettings):
 def get_settings() -> MonitorSettings:
     """Return cached monitor settings loaded from environment variables."""
     return MonitorSettings()
-
-
-def clear_settings_cache() -> None:
-    """Reset cached settings (useful in automated tests)."""
-    get_settings.cache_clear()
-    # Keep os env untouched; helper exists for deterministic test overrides.
-    _ = os.environ
 
