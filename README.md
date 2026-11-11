@@ -1,8 +1,8 @@
 # AutoHeal — Intelligent Self-Healing Infrastructure Automation Platform
 
-> **Current Stage:** Phase 3.5 Completed (Infrastructure Foundation, Python Monitoring Engine, FastAPI Control Plane, Prometheus + Alertmanager + Grafana Observability, Project Cleanup & Consolidated Documentation).
+> **Current Stage:** Phase 4.1 Completed (Infrastructure Foundation, Monitoring Engine, FastAPI Control Plane, Prometheus + Alertmanager + Grafana Observability, Consolidated Docs, and Remediation Policy Engine Foundation).
 >
-> **Scope Boundary:** Automated remediation execution is intentionally deferred to **Phase 4**; existing Ansible recovery files (`ansible/`, `docker/ansible.Dockerfile`, `remediation/recover.yml`) remain preserved and inactive.
+> **Scope Boundary:** Phase 4.1 adds validated remediation configuration and the safety-gating `RemediationPolicy` engine (`remediation/src/`) with remediation **disabled** and **dry-run enabled** by default. Actual automated Ansible recovery, SQLite remediation history, API routes, and Docker Socket Proxy access are **not implemented yet**.
 
 ---
 
@@ -226,14 +226,16 @@ AutoHeal/
 │       ├── prometheus.yml                        # Global 5s scrape & alertmanager target config
 │       └── rules/
 │           └── autoheal_alerts.yml               # 7 alert rules (service, monitor, API, incident)
-├── tests/                                        # Automated unit, API & observability config test suite
+├── tests/                                        # Automated unit, API, policy & observability tests
 │   ├── requirements.txt                          # Inherits monitoring + api deps plus pytest, pytest-asyncio, pyyaml
 │   ├── test_api.py                               # FastAPI endpoints & SQLite integration tests
 │   ├── test_config.py                            # MonitorSettings & ApiSettings validation tests
 │   ├── test_engine.py                            # MonitoringEngine loop, shutdown & JSON logging tests
 │   ├── test_health_checker.py                    # AsyncHealthChecker HTTP, payload, timeout & connection tests
 │   ├── test_incident_manager.py                  # Threshold state transitions, deduplication & restart recovery
-│   └── test_observability_config.py              # Prometheus, Alertmanager, Grafana & Compose hardening tests
+│   ├── test_observability_config.py              # Prometheus, Alertmanager, Grafana & Compose hardening tests
+│   ├── test_remediation_config.py                # Phase 4.1 remediation settings validation & safety defaults
+│   └── test_remediation_policy.py                # Phase 4.1 RemediationPolicy gate & reason code tests
 ├── data/
 │   └── .gitkeep                                  # Preserves data/ mount directory (autoheal.db* gitignored)
 ├── ansible/                                      # Preserved Phase 4 automation artifacts (inactive)
@@ -243,8 +245,13 @@ AutoHeal/
 │   └── webserver.yml
 ├── docker/
 │   └── ansible.Dockerfile                        # Preserved Phase 4 Ansible container definition (inactive)
-├── remediation/
-│   └── recover.yml                               # Preserved Phase 4 Ansible recovery playbook (inactive)
+├── remediation/                                  # Remediation policy engine (Phase 4.1) & preserved playbook
+│   ├── recover.yml                               # Preserved Phase 4 Ansible recovery playbook (inactive)
+│   └── src/
+│       ├── __init__.py
+│       ├── config.py                             # RemediationSettings validation & safe defaults
+│       ├── models.py                             # PolicyReason, RemediationAction, Request/Decision/State models
+│       └── policy.py                             # RemediationPolicy safety evaluator & provider protocols
 └── logs/                                         # Runtime log directory (`logs/*` gitignored; remediation.log local only)
 ```
 
@@ -414,6 +421,15 @@ cp .env.example .env
 | `GRAFANA_PORT` | `3000` | `grafana` | Host port mapped to Grafana UI `:3000` |
 | `GRAFANA_ADMIN_USER` | `admin` | `grafana` | Grafana administrator username |
 | `GRAFANA_ADMIN_PASSWORD` | `admin` | `grafana` | Grafana administrator password (change in `.env` outside local dev) |
+| `AUTOHEAL_REMEDIATION_ENABLED` | `false` | `remediation` | Global kill switch enabling/disabling automated remediation evaluation (`false` by default) |
+| `AUTOHEAL_REMEDIATION_DRY_RUN` | `true` | `remediation` | Marks approved decisions as dry-run only (`true` by default) |
+| `AUTOHEAL_REMEDIATION_COOLDOWN_SECONDS` | `300` | `remediation` | Minimum seconds required between remediation attempts (`>= 0`) |
+| `AUTOHEAL_REMEDIATION_MAX_ATTEMPTS` | `3` | `remediation` | Maximum allowed remediation attempts per incident (`>= 1`) |
+| `AUTOHEAL_REMEDIATION_TIMEOUT_SECONDS` | `120` | `remediation` | Maximum allowed execution timeout setting for future runner stages (`> 0`) |
+| `AUTOHEAL_ALLOWED_SERVICES` | `web` | `remediation` | Comma-separated allowlist of safe service identifiers (no wildcards) |
+| `AUTOHEAL_ALLOWED_ACTIONS` | `restart` | `remediation` | Comma-separated allowlist restricted to safe `RemediationAction` values (`restart`, `start`) |
+| `AUTOHEAL_REMEDIATION_VERIFY_INTERVAL` | `5` | `remediation` | Seconds between post-recovery verification checks (`> 0`) |
+| `AUTOHEAL_REMEDIATION_VERIFY_ATTEMPTS` | `6` | `remediation` | Post-recovery health verification probe count (`>= 1`) |
 
 ---
 
@@ -588,7 +604,7 @@ Defined in `observability/prometheus/rules/autoheal_alerts.yml` (group `autoheal
 Run the automated test suite and native config validators:
 
 ```bash
-# Automated unit, API, and observability configuration tests (30 tests across 6 files)
+# Automated unit, API, policy engine, and observability configuration tests (70 tests across 8 files)
 .venv/bin/python -B -m pytest -p no:cacheprovider -v tests/
 
 # Validate Compose syntax
@@ -685,13 +701,15 @@ Additional safeguards:
 - **Phase 1 — Infrastructure Foundation:** Completed and verified (`nginx:alpine` target service, `autoheal-network`, `:ro` mounts, Docker health check).
 - **Phase 2 — Monitoring Engine & FastAPI Control Plane:** Completed and verified (async `httpx` monitor, SQLite WAL state machine, deduplicated incident lifecycle, REST + Prometheus metrics API).
 - **Phase 3 — Observability & Alerting Stack:** Completed and verified (Prometheus `5s` scraping + 7 rules, Alertmanager grouping + inhibition, provisioned Grafana 10-panel dashboard, named volumes).
-- **Phase 3.5 — Cleanup & Consolidation:** Completed (removed unused Python helper code/imports, deduplicated incident-update branch logic and test fixture setup, consolidated all `docs/*.md` documentation into `README.md`).
+- **Phase 3.5 — Cleanup & Consolidation:** Completed (removed unused Python helper code/imports, deduplicated incident-update branch logic and test fixture setup, consolidated all docs into `README.md`).
+- **Phase 4.1 — Remediation Policy Engine:** Completed and verified via unit tests (`remediation/src/` adds validated `RemediationSettings`, safe `PolicyReason`/`RemediationAction` models, and `RemediationPolicy` gate evaluation; remediation remains disabled and dry-run enabled by default).
 
 ---
 
 ## 31. Known Limitations
 
-- **No active automated remediation yet:** Stopping or breaking `autoheal-web` is detected, recorded in SQLite, surfaced via FastAPI, and alerted via Prometheus/Alertmanager, but self-healing recovery execution waits for Phase 4.
+- **Actual automated recovery is not available yet (Phase 4.1 scope):** `RemediationPolicy` only evaluates whether a remediation request is permitted. Ansible subprocess execution, SQLite remediation history persistence, Docker Socket Proxy mediation, and remediation API routes are deferred to subsequent Phase 4 milestones.
+- **No active runtime trigger wiring yet:** Stopping or breaking `autoheal-web` is detected, recorded in SQLite, surfaced via FastAPI, and alerted via Prometheus/Alertmanager, without triggering `remediation/recover.yml`.
 - **Local-only default Alertmanager receivers:** Committed `observability/alertmanager/alertmanager.yml` intentionally contains empty receiver blocks (`autoheal-default`, `autoheal-critical`, `autoheal-warning`) to keep secrets out of Git; real delivery requires setting `ALERTMANAGER_CONFIG_FILE` to a gitignored `*.local.yml` file.
 - **Statically verified-only API/monitor failure alerts:** `AutoHealMonitoringEngineStalled`, `AutoHealApiDown`, and `AutoHealApiServerErrors` have been validated via `promtool`, `pytest`, and Prometheus `/api/v1/rules` loading, rather than live outage injection of `monitor` or `api`.
 - **Single-host SQLite backing store:** Designed for single-host Compose deployment; multi-host HA would require an external database such as PostgreSQL.
@@ -700,10 +718,39 @@ Additional safeguards:
 
 ## 32. Future Roadmap
 
-### Phase 4 — Automated Ansible Remediation Engine (Planned)
-- Wire confirmed failure alerts (Alertmanager webhook / coordinator trigger) to execute `ansible/` and `remediation/recover.yml` safely.
-- Add cooldown periods, maximum retry limits, flapping guards, and human escalation safeguards.
-- Broker container restart/start actions through a least-privilege **Docker Socket Proxy** instead of mounting `/var/run/docker.sock` directly into application containers.
+### Phase 4 — Automated Remediation Architecture & Policy Engine
+
+Phase 4 is intentionally split into incremental safety-first milestones so no automated recovery executes without verified guardrails:
+
+1. **Phase 4.1 — Remediation Policy Engine (`remediation/src/` — Completed):**
+   - **Architecture & Responsibilities:** `RemediationPolicy` acts as a pure, side-effect-free safety gate consuming read-only `IncidentProvider` and `RemediationStateProvider` protocols (defaulting to in-memory providers so Phase 4.2 can swap in SQLite storage cleanly). It accepts symbolic `RemediationRequest` values (`incident_id`, `service_name`, `action`) and returns an immutable `RemediationDecision` containing `allowed`, `reason` (`PolicyReason`), `dry_run`, `service_name`, `action`, and `incident_id`. It never accepts shell strings, binary paths, or playbook paths and never runs commands.
+   - **Default Safety Settings:** Remediation defaults to disabled (`AUTOHEAL_REMEDIATION_ENABLED=false`), dry-run defaults to enabled (`AUTOHEAL_REMEDIATION_DRY_RUN=true`), `AUTOHEAL_ALLOWED_SERVICES=web`, `AUTOHEAL_ALLOWED_ACTIONS=restart`, `AUTOHEAL_REMEDIATION_MAX_ATTEMPTS=3`, and `AUTOHEAL_REMEDIATION_COOLDOWN_SECONDS=300`. Unsafe tokens (wildcards such as `*`/`all`/`any`, shell metacharacters, empty allowlists, unsupported actions, non-positive limits, and boolean coercion on numeric fields) are rejected at config load time.
+   - **Policy Decision Flow:**
+
+     ```mermaid
+     flowchart TD
+         R[RemediationRequest<br/>incident_id, service_name, action] --> G1{1. Remediation<br/>Enabled?}
+         G1 -->|false| D1[Deny: REMEDIATION_DISABLED]
+         G1 -->|true| G2{2. Incident Exists,<br/>Matches Service & Open?}
+         G2 -->|missing / mismatch| D2[Deny: INCIDENT_NOT_FOUND]
+         G2 -->|resolved / closed| D3[Deny: INCIDENT_ALREADY_RESOLVED]
+         G2 -->|open| G3{3. Service in<br/>Allowed List?}
+         G3 -->|no| D4[Deny: SERVICE_NOT_ALLOWED]
+         G3 -->|yes| G4{4. Action in<br/>Allowed List?}
+         G4 -->|no| D5[Deny: ACTION_NOT_ALLOWED]
+         G4 -->|yes| G5{5. Already<br/>Running?}
+         G5 -->|yes| D6[Deny: REMEDIATION_ALREADY_RUNNING]
+         G5 -->|no| G6{6. Within Max Attempts?}
+         G6 -->|no| D7[Deny: MAX_ATTEMPTS_REACHED]
+         G6 -->|yes| G7{7. Cooldown<br/>Expired?}
+         G7 -->|no| D8[Deny: COOLDOWN_ACTIVE]
+         G7 -->|yes| OK[Approve: POLICY_APPROVED<br/>with dry_run flag]
+     ```
+
+2. **Planned Next Phase 4 Milestones:**
+   - **Phase 4.2 — SQLite Remediation History:** Persist remediation attempt counts, timestamps, outcomes, and active locks in SQLite and implement SQLite-backed `IncidentProvider` and `RemediationStateProvider`.
+   - **Phase 4.3 — Least-Privilege Execution & Socket Proxy:** Broker container `restart`/`start` operations through a constrained Docker Socket Proxy and execute fixed internal playbooks (`ansible/`, `remediation/recover.yml`) with strict subprocess timeouts and dry-run support.
+   - **Phase 4.4 — Control Plane API, Monitoring Integration & Verification:** Expose read-only remediation audit history endpoints in FastAPI, wire trigger/verification workflows, and verify end-to-end automated recovery safely.
 
 ### Phase 5 — Cloud Deployment & CI/CD (Planned)
 - Author Terraform modules for AWS cloud provisioning.
