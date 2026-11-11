@@ -1,189 +1,134 @@
-# AutoHeal — Self-Healing Infrastructure Automation
+# AutoHeal — Intelligent Self-Healing Infrastructure Automation Platform
 
-AutoHeal is a DevOps project that demonstrates how infrastructure automation can detect service failures, execute recovery actions, verify service health, and record remediation outcomes.
+## 1. Project Introduction
 
-The current prototype uses Docker Compose, Nginx, and Ansible to implement and test a basic self-healing workflow locally.
+**AutoHeal** is a phased DevOps infrastructure automation platform designed to monitor containerized services, track incidents persistently, visualize metrics and alerts, and prepare for safe automated remediation.
 
-## Features
+- **Phase 1 (Completed):** Containerized `nginx:alpine` target web app (`autoheal-web`), JSON `/health` endpoint, isolated `autoheal-network`, and `.env.example`.
+- **Phase 2 (Completed):** Asynchronous **Python Monitoring Engine** (`autoheal-monitor`) and decoupled **FastAPI Control Plane** (`autoheal-api`) backed by SQLite (`data/autoheal.db`).
+- **Phase 3 (Completed):** **Prometheus**, **Alertmanager**, and **Grafana** observability stack with scrape configs, 7 alert rules, alert grouping/inhibition, a provisioned 10-panel dashboard, and persistent Docker volumes—verified on macOS Apple Silicon (`arm64`).
 
-- Containerized environment using Docker Compose.
-- Nginx web server with a dedicated health endpoint.
-- Ansible-based infrastructure and service validation.
-- Recovery of stopped containers.
-- Post-recovery health verification.
-- Basic remediation audit logging.
-- Controlled failure simulation and recovery testing.
+---
 
-## Architecture
+## 2. Technology Stack
+
+| Component | Phase | Purpose |
+|---|---|---|
+| Docker & Docker Compose v2 | Phase 1–3 | Hardened multi-container orchestration on `autoheal-network` |
+| Nginx (`nginx:alpine`) | Phase 1 | Target web server (`/` and JSON `/health`) |
+| Python 3.12 + `httpx` + SQLite | Phase 2 | Async monitoring engine and persistent incident store |
+| FastAPI + `prometheus-client` | Phase 2 | Control plane REST API & Prometheus `/api/v1/metrics` exporter |
+| Prometheus (`v3.2.1`) | Phase 3 | Metrics scraping, TSDB storage (`prometheus-data`), alert rule evaluation |
+| Alertmanager (`v0.28.1`) | Phase 3 | Alert grouping, deduplication, inhibition, configurable receivers |
+| Grafana (`11.6.0`) | Phase 3 | Provisioned Prometheus datasource & **AutoHeal Infrastructure Overview** dashboard |
+| `pytest` + `promtool` + `amtool` | Phase 2–3 | Automated config, unit, API, and alert validation |
+| Ansible (`ansible/`, `remediation/`) | Planned (Phase 4) | Preserved recovery artifacts (inactive in Phase 3) |
+| AWS & Terraform | Planned (Phase 5) | Cloud infrastructure provisioning and CI/CD |
+
+---
+
+## 3. Architecture Overview
 
 ```mermaid
 flowchart TD
-    U[Developer / Tester] --> N[Nginx Web Container]
-    U -->|Runs playbook| A[Ansible Runner]
-    C[Docker Compose] --> N
-    C --> A
-    A -->|Check health endpoint| N
-    A -->|Inspect or start container| D[Docker Engine]
-    D --> N
-    A -->|Record result| L[Remediation Audit Log]
+    U[User / Operator] -->|HTTP :8080| W[autoheal-web]
+    U -->|HTTP :8000| A[autoheal-api]
+    U -->|HTTP :9090| P[autoheal-prometheus]
+    U -->|HTTP :9093| AM[autoheal-alertmanager]
+    U -->|HTTP :3000| G[autoheal-grafana]
 
-    classDef service fill:#dbeafe,stroke:#2563eb,color:#111827
-    classDef automation fill:#dcfce7,stroke:#16a34a,color:#111827
-    classDef logging fill:#fef3c7,stroke:#d97706,color:#111827
+    M[autoheal-monitor] -->|GET http://web/health| W
+    M -->|Writes state & metrics| DB[(./data/autoheal.db)]
+    A -->|Reads state & metrics| DB
 
-    class N,C service
-    class A,D automation
-    class L logging
+    P -->|Scrapes /api/v1/metrics| A
+    P -->|Evaluates rules & sends alerts| AM
+    G -->|Queries PromQL| P
+
+    subgraph Network ["autoheal-network (bridge)"]
+        W
+        M
+        A
+        P
+        AM
+        G
+    end
 ```
 
-See [docs/architecture.md](docs/architecture.md) for the detailed recovery workflow.
+- **No automated remediation runs in Phase 3:** existing Ansible files (`ansible/`, `docker/ansible.Dockerfile`, `remediation/recover.yml`) remain preserved untouched.
+- See [docs/architecture.md](docs/architecture.md) and [docs/security.md](docs/security.md) for architecture and hardening details.
 
-## Technology Stack
+---
 
-| Technology | Purpose |
-|---|---|
-| Docker | Container runtime |
-| Docker Compose | Local service orchestration |
-| Nginx | Web server and health endpoint |
-| Ansible | Validation and remediation |
-| YAML | Configuration and playbooks |
-| Git and GitHub | Version control |
-
-## Project Structure
+## 4. Project Directory Structure
 
 ```text
 AutoHeal/
-├── app/
-│   ├── html/index.html
-│   └── nginx/default.conf
-├── ansible/
-│   ├── ansible.cfg
-│   ├── inventory.ini
-│   ├── site.yml
-│   └── webserver.yml
-├── docker/ansible.Dockerfile
-├── remediation/recover.yml
-├── docs/architecture.md
-├── compose.yaml
-├── .gitignore
-└── README.md
+├── app/                         # Phase 1 Nginx web app & JSON /health config
+├── monitoring/                  # Phase 2 async Python monitoring engine
+├── api/                         # Phase 2 FastAPI control plane & /api/v1/metrics
+├── observability/
+│   ├── prometheus/
+│   │   ├── prometheus.yml       # Scrape config targeting api:8000/api/v1/metrics
+│   │   └── rules/
+│   │       └── autoheal_alerts.yml
+│   ├── alertmanager/
+│   │   └── alertmanager.yml     # Grouping, severity routing, inhibit rules, receivers
+│   └── grafana/
+│       └── provisioning/
+│           ├── datasources/prometheus.yml
+│           └── dashboards/
+│               ├── dashboards.yml
+│               └── autoheal_overview.json
+├── tests/                       # 30 automated pytest tests (Phase 2 + Phase 3)
+├── data/                        # Persistent SQLite DB (data/*.db* gitignored)
+├── docs/                        # Architecture, installation, security, testing, roadmap
+├── ansible/                     # Preserved recovery playbooks (inactive)
+├── docker/ansible.Dockerfile    # Preserved prototype image (inactive)
+├── remediation/recover.yml      # Preserved recovery playbook (inactive)
+├── compose.yaml                 # Hardened 6-service Docker Compose stack
+├── .env.example                 # Committed environment template
+└── .gitignore                   # Ignores .env, .venv/, data/*.db*, *.local.yml, logs/*
 ```
 
-## Prerequisites
+---
 
-- Docker Desktop installed and running.
-- Git installed.
-
-## Getting Started
-
-### 1. Clone the repository
+## 5. Getting Started & Endpoints
 
 ```bash
-git clone https://github.com/deewakar05/AutoHeal.git
-cd AutoHeal
-```
+# 1. Create local env config (never commit .env)
+cp .env.example .env
 
-### 2. Start the application
+# 2. Validate, build, and start all 6 services
+docker compose config
+docker compose up --build -d
+docker compose ps
 
-```bash
-docker compose up -d --build
-```
+# 3. Validate Prometheus & Alertmanager configs + run pytest suite
+docker exec autoheal-prometheus promtool check config /etc/prometheus/prometheus.yml
+docker exec autoheal-alertmanager amtool check-config /etc/alertmanager/alertmanager.yml
+.venv/bin/python -m pytest -v tests/
 
-### 3. Verify the web application
-
-Open http://localhost:8080 or run:
-
-```bash
-curl -i http://localhost:8080/health
-```
-
-Expected response:
-
-```text
-HTTP/1.1 200 OK
-
-healthy
-```
-
-### 4. Validate using Ansible
-
-```bash
-docker compose exec ansible ansible-playbook site.yml
-docker compose exec ansible ansible-playbook webserver.yml
-```
-
-### 5. Run the recovery playbook
-
-```bash
-docker compose exec ansible ansible-playbook ../remediation/recover.yml
-```
-
-### 6. Test a stopped-container failure
-
-Stop the web container:
-
-```bash
-docker stop autoheal-web
-```
-
-Run the recovery playbook again:
-
-```bash
-docker compose exec ansible ansible-playbook ../remediation/recover.yml
-```
-
-Verify recovery:
-
-```bash
-curl -i http://localhost:8080/health
-cat logs/remediation.log
-```
-
-### 7. Stop the environment
-
-```bash
+# 4. Stop stack (preserves ./data/autoheal.db and named observability volumes)
 docker compose down
 ```
 
-## Testing Results
+### Service Endpoints
 
-The local prototype has successfully demonstrated:
+| Service | URL | Notes |
+|---|---|---|
+| Nginx Web App | `http://localhost:8080/` | Landing page & `/health` JSON |
+| FastAPI Control Plane | `http://localhost:8000/api/v1/status` | Also `/health`, `/api/v1/incidents`, `/api/v1/metrics` |
+| Prometheus | `http://localhost:9090/` | Scrape targets, PromQL, `/alerts`, `/rules` |
+| Alertmanager | `http://localhost:9093/` | Grouped, deduplicated, and inhibited alerts |
+| Grafana | `http://localhost:3000/` | Login via `.env` (`admin`/`admin` local default); **AutoHeal Infrastructure Overview** |
 
-- Application and health endpoint availability.
-- Successful Ansible validation.
-- Recovery after deliberately stopping the web container.
-- Successful post-recovery HTTP health verification.
-- Recording health and recovery outcomes in an audit log.
+---
 
-## Current Limitations
+## 6. Known Limitations & Documentation
 
-- Recovery is triggered manually by running the Ansible playbook.
-- Monitoring-driven failure detection and automatic event triggering are not implemented yet.
-- Recovery rate limits and escalation remain future improvements.
-- Audit logs are basic and stored locally.
-- Cloud infrastructure recovery has not yet been validated.
+- **External notification receivers:** `observability/alertmanager/alertmanager.yml` groups, deduplicates, routes, and inhibits alerts locally without external credentials. To deliver Slack/webhook/SMTP notifications, point `ALERTMANAGER_CONFIG_FILE` in `.env` to an untracked `*.local.yml` receiver file.
+- **No automated remediation yet:** Automated recovery execution is deferred to Phase 4.
+- **Fault-injected vs. static alert rules:** `AutoHealServiceDown`, `AutoHealConsecutiveCheckFailures`, `AutoHealMonitoringProbeFailures`, and `AutoHealUnresolvedIncident` were verified live; `AutoHealMonitoringEngineStalled`, `AutoHealApiDown`, and `AutoHealApiServerErrors` were validated via `promtool` and `pytest` without injecting monitor/API outages.
 
-## Future Enhancements
-
-- Prometheus and Alertmanager integration.
-- Webhook-triggered remediation.
-- Recovery rate limiting and failure escalation.
-- Grafana dashboards for monitoring and recovery metrics.
-- Terraform and AWS integration.
-- Automated testing and CI/CD.
-
-## Security
-
-The Ansible runner mounts the Docker socket to control local containers. This grants extensive control over the Docker environment. Keep this setup restricted to a trusted development environment and never expose the socket or runner to untrusted users.
-
-## Project Status
-
-The local recovery prototype is working. Automated monitoring triggers, additional safety controls, and cloud integration remain planned improvements.
-
-## Author
-
-**Deewakar Kumar**
-
-GitHub: [@deewakar05](https://github.com/deewakar05)
-
-Repository: [AutoHeal](https://github.com/deewakar05/AutoHeal)
+Documentation index: [Architecture](docs/architecture.md) · [Installation](docs/installation.md) · [Testing](docs/testing.md) · [Security](docs/security.md) · [Roadmap](docs/roadmap.md)

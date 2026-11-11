@@ -1,0 +1,87 @@
+groups:
+  - name: autoheal_service_and_platform_alerts
+    rules:
+      - alert: AutoHealServiceDown
+        expr: autoheal_service_up == 0
+        for: 10s
+        labels:
+          severity: critical
+          component: target-service
+        annotations:
+          summary: "Monitored service {{ $labels.service }} is unhealthy"
+          description: >-
+            Service {{ $labels.service }} has been reported unhealthy
+            (autoheal_service_up == 0) for more than 10 seconds.
+
+      - alert: AutoHealConsecutiveCheckFailures
+        expr: autoheal_consecutive_failures > 0
+        for: 5s
+        labels:
+          severity: warning
+          component: target-service
+        annotations:
+          summary: "Consecutive health check failures on {{ $labels.service }}"
+          description: >-
+            Service {{ $labels.service }} currently has
+            {{ $value }} consecutive failed health checks.
+
+      - alert: AutoHealMonitoringProbeFailures
+        expr: sum by (service) (increase(autoheal_health_checks_total{outcome!="success"}[1m])) > 0
+        for: 10s
+        labels:
+          severity: warning
+          component: monitoring
+        annotations:
+          summary: "Monitoring engine detecting failed probes for {{ $labels.service }}"
+          description: >-
+            Non-success health check probes were recorded for
+            {{ $labels.service }} in the last minute.
+
+      - alert: AutoHealMonitoringEngineStalled
+        expr: sum by (service) (increase(autoheal_health_checks_total[30s])) == 0
+        for: 25s
+        labels:
+          severity: critical
+          component: monitoring
+        annotations:
+          summary: "Monitoring engine stalled for {{ $labels.service }}"
+          description: >-
+            No new health checks have been recorded for {{ $labels.service }}
+            over the evaluation window; autoheal-monitor may be down or stalled.
+
+      - alert: AutoHealApiDown
+        expr: up{job="autoheal-api"} == 0
+        for: 10s
+        labels:
+          severity: critical
+          component: control-plane-api
+        annotations:
+          summary: "AutoHeal FastAPI control plane is unreachable"
+          description: >-
+            Prometheus failed to scrape autoheal-api (/api/v1/metrics)
+            for more than 10 seconds.
+
+      - alert: AutoHealApiServerErrors
+        expr: sum(rate(autoheal_api_requests_total{status_code=~"5.."}[1m])) > 0
+        for: 10s
+        labels:
+          severity: warning
+          component: control-plane-api
+        annotations:
+          summary: "AutoHeal FastAPI control plane returning HTTP 5xx errors"
+          description: >-
+            One or more 5xx responses were recorded by autoheal-api
+            in the last minute.
+
+      - alert: AutoHealUnresolvedIncident
+        expr: autoheal_open_incidents > 0
+        for: 20s
+        labels:
+          severity: critical
+          component: incident-management
+        annotations:
+          summary: "Unresolved incident open for {{ $labels.service }}"
+          description: >-
+            Service {{ $labels.service }} has {{ $value }} open incident(s)
+            requiring attention or recovery confirmation.
+
