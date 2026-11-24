@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Path, Query
 
 from ..config import get_settings
 from ..database import ensure_database, get_connection
@@ -14,6 +14,7 @@ router = APIRouter(prefix="/api/v1", tags=["incidents"])
 
 
 def _row_to_response(row) -> IncidentResponse:
+    keys = set(row.keys())
     return IncidentResponse(
         id=int(row["id"]),
         service_name=row["service_name"],
@@ -23,6 +24,16 @@ def _row_to_response(row) -> IncidentResponse:
         resolved_at=row["resolved_at"],
         last_seen_at=row["last_seen_at"],
         failure_count=int(row["failure_count"]),
+        source=str(row["source"]) if "source" in keys and row["source"] else "internal_monitor",
+        host_name=row["host_name"] if "host_name" in keys else None,
+        nagios_service_name=row["nagios_service_name"] if "nagios_service_name" in keys else None,
+        nagios_state=row["nagios_state"] if "nagios_state" in keys else None,
+        nagios_alert_count=(
+            int(row["nagios_alert_count"])
+            if "nagios_alert_count" in keys and row["nagios_alert_count"] is not None
+            else 0
+        ),
+        flapping=bool(row["flapping"]) if "flapping" in keys and row["flapping"] is not None else False,
     )
 
 
@@ -73,7 +84,7 @@ def list_incidents(
 
 
 @router.get("/incidents/{incident_id}", response_model=IncidentResponse)
-def get_incident(incident_id: int) -> IncidentResponse:
+def get_incident(incident_id: int = Path(..., ge=1, description="Incident ID")) -> IncidentResponse:
     """Fetch a single incident by ID."""
     settings = get_settings()
     ensure_database(settings.autoheal_db_path)
@@ -88,4 +99,3 @@ def get_incident(incident_id: int) -> IncidentResponse:
         raise HTTPException(status_code=404, detail=f"Incident {incident_id} not found")
 
     return _row_to_response(row)
-

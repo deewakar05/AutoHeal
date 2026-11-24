@@ -7,8 +7,8 @@ from collections.abc import Callable
 import httpx
 import pytest
 
-from monitoring.src.health_checker import AsyncHealthChecker
-from monitoring.src.models import CheckOutcome, HealthCheckResult
+from remediation.src.health_checker import AsyncHealthChecker
+from remediation.src.models import CheckOutcome, HealthCheckResult
 
 
 async def _run_probe(
@@ -79,4 +79,3 @@ async def test_health_check_timeout() -> None:
     assert result.outcome == CheckOutcome.TIMEOUT
     assert result.status_code is None
     assert "timed out" in (result.error or "").lower()
-

@@ -11,8 +11,7 @@ from fastapi import FastAPI, Request
 from .config import get_settings
 from .database import ensure_database
 from .logging_config import configure_logging
-from .routes import health, incidents, metrics, status
-from .routes.metrics import API_REQUESTS_TOTAL
+from .routes import health, incidents, nagios, remediations, status
 
 logger = logging.getLogger("control-plane-api")
 
@@ -39,8 +38,11 @@ def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
     app = FastAPI(
         title="AutoHeal Control Plane API",
-        description="Read-only observability, service status, and incident history API for AutoHeal.",
-        version="0.2.0",
+        description=(
+            "Read-only observability, service status, incident history, "
+            "and remediation visibility API for AutoHeal."
+        ),
+        version="0.3.0",
         lifespan=lifespan,
     )
 
@@ -49,13 +51,6 @@ def create_app() -> FastAPI:
         started = time.perf_counter()
         response = await call_next(request)
         duration_ms = round((time.perf_counter() - started) * 1000.0, 2)
-        route = request.scope.get("route")
-        route_path = route.path if route is not None else request.url.path
-        API_REQUESTS_TOTAL.labels(
-            method=request.method,
-            path=route_path,
-            status_code=str(response.status_code),
-        ).inc()
         logger.info(
             "HTTP request processed",
             extra={
@@ -71,9 +66,9 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(status.router)
     app.include_router(incidents.router)
-    app.include_router(metrics.router)
+    app.include_router(remediations.router)
+    app.include_router(nagios.router)
     return app
 
 
 app = create_app()
-

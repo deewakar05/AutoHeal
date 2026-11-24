@@ -2,71 +2,39 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import threading
 from pathlib import Path
 
-SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS service_status (
-    service_name TEXT PRIMARY KEY,
-    target_url TEXT NOT NULL,
-    status TEXT NOT NULL,
-    consecutive_failures INTEGER NOT NULL DEFAULT 0,
-    consecutive_successes INTEGER NOT NULL DEFAULT 0,
-    last_checked_at TEXT,
-    last_status_change_at TEXT,
-    last_http_status INTEGER,
-    last_response_time_ms REAL,
-    last_error TEXT,
-    active_incident_id INTEGER,
-    updated_at TEXT NOT NULL
-);
+from remediation.src.database import (
+    CORE_MONITORING_SCHEMA_SQL,
+    ensure_autoheal_database,
+)
 
-CREATE TABLE IF NOT EXISTS incidents (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    service_name TEXT NOT NULL,
-    status TEXT NOT NULL,
-    failure_reason TEXT NOT NULL,
-    started_at TEXT NOT NULL,
-    resolved_at TEXT,
-    last_seen_at TEXT NOT NULL,
-    failure_count INTEGER NOT NULL DEFAULT 1
-);
+_INIT_LOCK = threading.Lock()
+_INITIALIZED_DBS: set[tuple[str, int, int]] = set()
 
-CREATE TABLE IF NOT EXISTS monitoring_counters (
-    metric_name TEXT NOT NULL,
-    labels_json TEXT NOT NULL,
-    value REAL NOT NULL DEFAULT 0,
-    PRIMARY KEY (metric_name, labels_json)
-);
-
-CREATE TABLE IF NOT EXISTS monitoring_histogram_buckets (
-    metric_name TEXT NOT NULL,
-    labels_json TEXT NOT NULL,
-    le TEXT NOT NULL,
-    bucket_count INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (metric_name, labels_json, le)
-);
-
-CREATE TABLE IF NOT EXISTS monitoring_histogram_totals (
-    metric_name TEXT NOT NULL,
-    labels_json TEXT NOT NULL,
-    total_sum REAL NOT NULL DEFAULT 0,
-    total_count INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (metric_name, labels_json)
-);
-"""
+SCHEMA_SQL = CORE_MONITORING_SCHEMA_SQL
 
 
 def ensure_database(db_path: str) -> None:
-    """Create the SQLite database file and schema if missing."""
-    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path, timeout=5.0)
-    try:
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.executescript(SCHEMA_SQL)
-        conn.commit()
-    finally:
-        conn.close()
+    """Create the SQLite database file and schema if missing or uninitialized."""
+    resolved = Path(db_path).resolve() if db_path != ":memory:" else None
+    if resolved is not None and resolved.is_file():
+        stat = os.stat(resolved)
+        key = (str(resolved), stat.st_dev, stat.st_ino)
+        with _INIT_LOCK:
+            if key in _INITIALIZED_DBS:
+                return
+
+    ensure_autoheal_database(db_path)
+
+    if resolved is not None and resolved.is_file():
+        stat = os.stat(resolved)
+        key = (str(resolved), stat.st_dev, stat.st_ino)
+        with _INIT_LOCK:
+            _INITIALIZED_DBS.add(key)
 
 
 def get_connection(db_path: str) -> sqlite3.Connection:
@@ -85,4 +53,3 @@ def check_database_health(db_path: str) -> bool:
         return True
     finally:
         conn.close()
-
