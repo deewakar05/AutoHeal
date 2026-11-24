@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from api.src.config import ApiSettings
-from monitoring.src.config import MonitorSettings
+from remediation.src.monitor_config import MonitorSettings
 
 
 def test_monitor_settings_defaults() -> None:
@@ -40,8 +40,14 @@ def test_monitor_settings_legacy_interval_aliases(monkeypatch: pytest.MonkeyPatc
         {"monitor_target_service": "   "},
         {"monitor_interval": 0},
         {"monitor_interval": -2},
+        {"monitor_interval": float("nan")},
+        {"monitor_interval": float("inf")},
+        {"monitor_interval": True},
         {"monitor_timeout": 0},
+        {"monitor_timeout": float("nan")},
+        {"monitor_timeout": float("inf")},
         {"monitor_failure_threshold": 0},
+        {"monitor_failure_threshold": True},
         {"monitor_recovery_threshold": 0},
         {"log_level": "TRACE"},
     ],
@@ -56,3 +62,29 @@ def test_api_settings_rejects_invalid_port(bad_port: int) -> None:
     with pytest.raises(ValidationError):
         ApiSettings(_env_file=None, api_port=bad_port)
 
+
+def test_nagios_settings_validation_and_secret_redaction() -> None:
+    mon = MonitorSettings(
+        _env_file=None,
+        nagios_monitor_enabled=True,
+        nagios_status_url="http://nagios:8081/nagios4/cgi-bin/statusjson.cgi?query=programstatus",
+        nagios_admin_user="nagiosadmin",
+        nagios_admin_password="secret-password",
+    )
+    assert "secret-password" not in repr(mon)
+
+    with pytest.raises(ValidationError):
+        MonitorSettings(_env_file=None, nagios_status_url="ftp://nagios/bad")
+    with pytest.raises(ValidationError):
+        MonitorSettings(_env_file=None, nagios_probe_timeout=0)
+    with pytest.raises(ValidationError):
+        MonitorSettings(_env_file=None, nagios_probe_timeout=True)
+
+    api_cfg = ApiSettings(
+        _env_file=None,
+        autoheal_nagios_webhook_secret="webhook-secret-xyz",
+        autoheal_nagios_service_map="edge-web:*=web",
+    )
+    assert "webhook-secret-xyz" not in repr(api_cfg)
+    with pytest.raises(ValidationError):
+        ApiSettings(_env_file=None, autoheal_nagios_service_map="invalid-entry-without-equals")

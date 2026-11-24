@@ -1,10 +1,10 @@
-"""Automated unit tests for Phase 4.1 RemediationPolicy decisions and safety gates."""
+"""Automated unit tests for RemediationPolicy decisions and safety gates."""
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from monitoring.src.models import IncidentRecord, IncidentStatus
+from remediation.src.models import IncidentRecord, IncidentStatus
 from remediation.src.config import RemediationSettings
 from remediation.src.models import (
     IncidentSnapshot,
@@ -278,4 +278,3 @@ def test_compatibility_with_monitoring_incident_record() -> None:
     assert decision.allowed is True
     assert decision.reason == PolicyReason.POLICY_APPROVED
     assert decision.incident_id == 7
-

@@ -1,74 +1,98 @@
-- name: AutoHeal recovery workflow
+- name: AutoHeal isolated recovery workflow
   hosts: local
   gather_facts: false
 
-  tasks:
-    - name: Check initial web health
-      ansible.builtin.uri:
-        url: http://web/health
-        status_code: 200
-        return_content: true
-      register: initial_health
-      failed_when: false
-      changed_when: false
+  vars:
+    autoheal_target_service: "web"
+    autoheal_action: "restart"
+    allowed_services:
+      - web
+    allowed_actions:
+      - restart
+      - start
+    target_container_name: "autoheal-{{ autoheal_target_service }}"
 
-    - name: Inspect container state
+  tasks:
+    - name: Validate remediation target service and action against fixed allowlists
+      ansible.builtin.assert:
+        that:
+          - autoheal_target_service is string
+          - autoheal_action is string
+          - autoheal_target_service in allowed_services
+          - autoheal_action in allowed_actions
+        fail_msg: >-
+          Rejected unapproved target_service='{{ autoheal_target_service }}'
+          or action='{{ autoheal_action }}'.
+        success_msg: >-
+          Validated remediation request for container '{{ target_container_name }}'
+          with action '{{ autoheal_action }}'.
+
+    - name: Inspect current container state via restricted Docker endpoint
       ansible.builtin.command:
         argv:
           - docker
           - inspect
           - --format={{ '{{' }}.State.Status{{ '}}' }}
-          - autoheal-web
-      register: container_state
+          - "{{ target_container_name }}"
+      register: container_inspect
+      check_mode: false
       changed_when: false
 
-    - name: Restart running container if unhealthy
-      ansible.builtin.command:
-        argv: [docker, restart, autoheal-web]
-      when:
-        - initial_health.status | default(0) != 200
-        - container_state.stdout == "running"
-
-    - name: Start stopped container if unhealthy
-      ansible.builtin.command:
-        argv: [docker, start, autoheal-web]
-      when:
-        - initial_health.status | default(0) != 200
-        - container_state.stdout != "running"
-
-    - name: Wait for web health to recover
-      ansible.builtin.uri:
-        url: http://web/health
-        status_code: 200
-        return_content: true
-      register: recovery_check
-      until: recovery_check.status | default(0) == 200
-      retries: 10
-      delay: 3
-      failed_when: false
-      changed_when: false
-
-    - name: Determine recovery outcome
-      ansible.builtin.set_fact:
-        recovery_outcome: >-
-          {{ 'healthy' if (initial_health.status | default(0) == 200)
-             else ('recovered' if (recovery_check.status | default(0) == 200)
-             else 'failed') }}
-
-    - name: Append outcome to audit log
-      ansible.builtin.shell:
-        cmd: >-
-          printf '%s | %s | initial_status=%s | final_status=%s\n'
-          "$(date -u +%FT%TZ)"
-          "{{ recovery_outcome }}"
-          "{{ initial_health.status | default('unreachable') }}"
-          "{{ recovery_check.status | default('unreachable') }}"
-          >> /workspace/logs/remediation.log
-      changed_when: true
-
-    - name: Confirm recovery succeeded
+    - name: Verify inspected state is non-empty
       ansible.builtin.assert:
         that:
-          - recovery_check.status | default(0) == 200
-        success_msg: "AutoHeal verified that the web service is healthy."
-        fail_msg: "Recovery failed. Check the container and audit log."
+          - (container_inspect.stdout | trim) | length > 0
+        fail_msg: "Unable to determine Docker state for {{ target_container_name }}."
+
+    - name: Execute approved container restart action
+      ansible.builtin.command:
+        argv:
+          - docker
+          - restart
+          - "{{ target_container_name }}"
+      register: restart_cmd
+      when:
+        - autoheal_action == "restart"
+        - not ansible_check_mode
+      changed_when: true
+
+    - name: Execute approved container start action
+      ansible.builtin.command:
+        argv:
+          - docker
+          - start
+          - "{{ target_container_name }}"
+      register: start_cmd
+      when:
+        - autoheal_action == "start"
+        - (container_inspect.stdout | trim) != "running"
+        - not ansible_check_mode
+      changed_when: true
+
+    - name: Inspect post-action container state
+      ansible.builtin.command:
+        argv:
+          - docker
+          - inspect
+          - --format={{ '{{' }}.State.Status{{ '}}' }}
+          - "{{ target_container_name }}"
+      register: post_inspect
+      check_mode: false
+      changed_when: false
+
+    - name: Confirm container entered running state when not in check mode
+      ansible.builtin.assert:
+        that:
+          - (post_inspect.stdout | trim) == "running"
+        fail_msg: >-
+          Container '{{ target_container_name }}' state after '{{ autoheal_action }}'
+          is '{{ post_inspect.stdout | trim }}' (expected 'running').
+      when: not ansible_check_mode
+
+    - name: Report structured Ansible execution summary
+      ansible.builtin.debug:
+        msg: >-
+          target={{ target_container_name }} action={{ autoheal_action }}
+          check_mode={{ ansible_check_mode }}
+          initial_state={{ container_inspect.stdout | trim }}
+          post_state={{ post_inspect.stdout | trim }}

@@ -1,4 +1,4 @@
-"""Automated unit tests for Phase 4.1 remediation configuration validation and safety defaults."""
+"""Automated unit tests for remediation configuration validation and safety defaults."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ def test_remediation_settings_safe_defaults() -> None:
     assert settings.autoheal_allowed_actions == ("restart",)
     assert settings.autoheal_remediation_verify_interval == 5.0
     assert settings.autoheal_remediation_verify_attempts == 6
+    assert settings.autoheal_db_path == "/data/autoheal.db"
 
 
 def test_remediation_never_enabled_implicitly_when_other_vars_set(
@@ -80,6 +81,8 @@ def test_allowlist_normalization_and_deduplication(monkeypatch: pytest.MonkeyPat
         {"autoheal_allowed_actions": "exec"},
         {"autoheal_allowed_actions": "shell"},
         {"autoheal_allowed_actions": "restart, /bin/sh"},
+        {"autoheal_db_path": ""},
+        {"autoheal_db_path": "   "},
     ],
 )
 def test_remediation_settings_rejects_invalid_and_unsafe_config(
@@ -96,3 +99,47 @@ def test_remediation_settings_rejects_invalid_env_strings(
     with pytest.raises(ValidationError):
         RemediationSettings(_env_file=None)
 
+
+def test_remediation_settings_allows_custom_db_path_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTOHEAL_DB_PATH", " /tmp/custom-autoheal.db ")
+    clear_settings_cache()
+
+    try:
+        settings = get_settings()
+        assert settings.autoheal_db_path == "/tmp/custom-autoheal.db"
+    finally:
+        clear_settings_cache()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"autoheal_remediation_verify_required_successes": 0},
+        {"autoheal_remediation_max_concurrency": 0},
+        {"autoheal_remediation_timeout_seconds": float("nan")},
+        {"autoheal_remediation_timeout_seconds": float("inf")},
+        {"autoheal_remediation_stale_timeout_seconds": 0},
+        {"autoheal_remediation_stale_timeout_seconds": float("nan")},
+        {"autoheal_remediation_executor_poll_interval": -1},
+        {"autoheal_remediation_verify_interval": float("inf")},
+        {"autoheal_remediation_allowed_proxy_host": ""},
+        {"autoheal_remediation_allowed_proxy_host": "bad host!"},
+        {"autoheal_remediation_allowed_proxy_port": 0},
+        {"autoheal_remediation_allowed_proxy_port": 70000},
+        {"autoheal_remediation_allowed_proxy_port": True},
+        {"autoheal_remediation_verify_target_url": "ftp://web/health"},
+        {"autoheal_remediation_dispatch_mode": "invalid_mode"},
+        {"autoheal_remediation_approved_playbooks": "../outside.yml"},
+        {"autoheal_ansible_playbook_path": "remediation/unapproved.yml"},
+        {"autoheal_ansible_inventory_path": "/etc/hosts"},
+        {"autoheal_ansible_config_path": "../ansible.cfg"},
+        {"autoheal_ansible_executable": "/bin/sh"},
+    ],
+)
+def test_remediation_settings_rejects_unsafe_execution_fields(
+    overrides: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        RemediationSettings(_env_file=None, **overrides)

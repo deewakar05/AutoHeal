@@ -10,11 +10,11 @@ from pathlib import Path
 import httpx
 import pytest
 
-from monitoring.src.config import MonitorSettings
-from monitoring.src.health_checker import AsyncHealthChecker
-from monitoring.src.logging_config import JsonFormatter
-from monitoring.src.models import ServiceState
-from monitoring.src.monitor import MonitoringEngine
+from remediation.src.health_checker import AsyncHealthChecker
+from remediation.src.logging_config import JsonFormatter
+from remediation.src.models import ServiceState
+from remediation.src.monitor import MonitoringEngine
+from remediation.src.monitor_config import MonitorSettings
 
 
 @pytest.mark.asyncio
@@ -73,4 +73,3 @@ def test_json_formatter_outputs_valid_json() -> None:
     assert parsed["event"] == "health_check_result"
     assert parsed["duration_ms"] == 5.4
     assert parsed["message"] == "Check complete"
-

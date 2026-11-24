@@ -8,7 +8,6 @@ __pycache__/
 .pytest_cache/
 data/*
 !data/.gitkeep
-observability/alertmanager/*.local.yml
 logs/*
 !logs/.gitkeep
 .DS_Store

@@ -5,9 +5,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from monitoring.src.incident_manager import IncidentManager
-from monitoring.src.metrics import MonitorMetrics
-from monitoring.src.models import (
+from remediation.src.incident_manager import IncidentManager
+from remediation.src.metrics import MonitorMetrics
+from remediation.src.models import (
     CheckOutcome,
     HealthCheckResult,
     IncidentStatus,
@@ -97,4 +97,3 @@ def test_recovery_threshold_resolves_incident_and_persists_across_restart(tmp_pa
     prom_text = metrics.render_prometheus()
     assert "autoheal_health_checks_total" in prom_text
     assert "autoheal_service_up" in prom_text
-

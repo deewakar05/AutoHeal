@@ -1,8 +1,8 @@
-"""Configuration validation tests for Phase 3 observability artifacts."""
+"""Configuration validation tests for AutoHeal Nagios monitoring, compose security, and docs hygiene."""
 
 from __future__ import annotations
 
-import json
+import re
 from pathlib import Path
 
 import yaml
@@ -14,126 +14,100 @@ def _load_yaml(rel_path: str) -> dict:
     return yaml.safe_load((REPO_ROOT / rel_path).read_text(encoding="utf-8"))
 
 
-def test_prometheus_scrape_configuration() -> None:
-    cfg = _load_yaml("observability/prometheus/prometheus.yml")
+def test_nagios_core_object_configuration() -> None:
+    """Validate Nagios Core object definitions for monitored infrastructure."""
+    hosts_cfg = (REPO_ROOT / "nagios/etc/objects/hosts.cfg").read_text(encoding="utf-8")
+    assert "host_name   autoheal-web" in hosts_cfg
+    assert "host_name   autoheal-api" in hosts_cfg
+    assert "host_name   autoheal-nagios" in hosts_cfg
+    assert "check_tcp_port!80" in hosts_cfg
+    assert "check_tcp_port!8000" in hosts_cfg
 
-    assert cfg["global"]["scrape_interval"] == "5s"
-    assert cfg["global"]["evaluation_interval"] == "5s"
-    assert "/etc/prometheus/rules/*.yml" in cfg["rule_files"]
-
-    am_targets = cfg["alerting"]["alertmanagers"][0]["static_configs"][0]["targets"]
-    assert "alertmanager:9093" in am_targets
-
-    jobs = {job["job_name"]: job for job in cfg["scrape_configs"]}
-    assert "autoheal-api" in jobs
-    api_job = jobs["autoheal-api"]
-    assert api_job["metrics_path"] == "/api/v1/metrics"
-    assert "api:8000" in api_job["static_configs"][0]["targets"]
-    # Avoid shadowing metric-level `service="web"` label into `exported_service`.
-    assert "service" not in api_job["static_configs"][0].get("labels", {})
+    services_cfg = (REPO_ROOT / "nagios/etc/objects/services.cfg").read_text(encoding="utf-8")
+    assert "service_description Web HTTP Health" in services_cfg
+    assert "service_description API Health" in services_cfg
+    assert "service_description Nagios Web UI Auth" in services_cfg
+    assert "check_http_endpoint!80!/health" in services_cfg
+    assert "check_http_endpoint!8000!/health" in services_cfg
 
 
-def test_prometheus_alert_rules_cover_required_scenarios() -> None:
-    rules_doc = _load_yaml("observability/prometheus/rules/autoheal_alerts.yml")
-    groups = rules_doc["groups"]
-    assert len(groups) >= 1
+def test_nagios_notification_commands_structure() -> None:
+    """Validate Nagios event handler notification commands and contacts."""
+    commands_cfg = (REPO_ROOT / "nagios/etc/objects/commands.cfg").read_text(encoding="utf-8")
+    assert "command_name    notify-service-autoheal" in commands_cfg
+    assert "command_name    notify-host-autoheal" in commands_cfg
+    assert "nagios_notify.py" in commands_cfg
+    assert "--kind service" in commands_cfg
+    assert "--kind host" in commands_cfg
 
-    rules = {rule["alert"]: rule for group in groups for rule in group["rules"]}
-    expected_alerts = {
-        "AutoHealServiceDown",
-        "AutoHealConsecutiveCheckFailures",
-        "AutoHealMonitoringProbeFailures",
-        "AutoHealMonitoringEngineStalled",
-        "AutoHealApiDown",
-        "AutoHealApiServerErrors",
-        "AutoHealUnresolvedIncident",
-    }
-    assert expected_alerts.issubset(rules.keys())
+    contacts_cfg = (REPO_ROOT / "nagios/etc/objects/contacts.cfg").read_text(encoding="utf-8")
+    assert "contact_name                    autoheal-webhook" in contacts_cfg
+    assert "notify-service-autoheal" in contacts_cfg
+    assert "notify-host-autoheal" in contacts_cfg
 
-    for name, rule in rules.items():
-        assert rule.get("expr"), f"{name} missing expr"
-        assert rule.get("for"), f"{name} missing for duration"
-        assert rule.get("labels", {}).get("severity") in {"critical", "warning"}
-        assert rule.get("annotations", {}).get("summary")
-        assert rule.get("annotations", {}).get("description")
+    templates_cfg = (REPO_ROOT / "nagios/etc/objects/templates.cfg").read_text(encoding="utf-8")
+    assert "name                            autoheal-host" in templates_cfg
+    assert "name                            autoheal-service" in templates_cfg
 
 
-def test_alertmanager_grouping_deduplication_and_receivers() -> None:
-    am = _load_yaml("observability/alertmanager/alertmanager.yml")
-
-    route = am["route"]
-    assert {"alertname", "service", "severity"}.issubset(set(route["group_by"]))
-    assert route["group_wait"]
-    assert route["group_interval"]
-    assert route["repeat_interval"]
-
-    receivers = {item["name"] for item in am["receivers"]}
-    assert route["receiver"] in receivers
-    for subroute in route.get("routes", []):
-        assert subroute["receiver"] in receivers
-
-    assert len(am.get("inhibit_rules", [])) >= 2
-
-
-def test_grafana_provisioning_and_dashboard() -> None:
-    ds_doc = _load_yaml("observability/grafana/provisioning/datasources/prometheus.yml")
-    ds = ds_doc["datasources"][0]
-    assert ds["type"] == "prometheus"
-    assert ds["uid"] == "autoheal-prometheus"
-    assert ds["url"] == "http://prometheus:9090"
-    assert ds["isDefault"] is True
-
-    provider_doc = _load_yaml("observability/grafana/provisioning/dashboards/dashboards.yml")
-    provider = provider_doc["providers"][0]
-    assert provider["options"]["path"] == "/etc/grafana/provisioning/dashboards"
-
-    dashboard = json.loads(
-        (REPO_ROOT / "observability/grafana/provisioning/dashboards/autoheal_overview.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    assert dashboard["uid"] == "autoheal-overview"
-    assert len(dashboard["panels"]) >= 8
-
-    all_exprs = []
-    for panel in dashboard["panels"]:
-        assert panel["datasource"]["uid"] == "autoheal-prometheus"
-        for target in panel["targets"]:
-            all_exprs.append(target["expr"])
-
-    joined = "\n".join(all_exprs)
-    for expected_metric in (
-        "autoheal_service_up",
-        "autoheal_open_incidents",
-        "autoheal_consecutive_failures",
-        "autoheal_health_checks_total",
-        "autoheal_health_check_duration_seconds_bucket",
-        "autoheal_api_requests_total",
-        "autoheal_incidents_total",
-        "up{job=",
-    ):
-        assert expected_metric in joined
-
-
-def test_compose_preserves_phase2_and_hardens_phase3() -> None:
+def test_compose_and_proxy_hardening_baseline() -> None:
+    """Verify production security baseline for the 5-container architecture."""
     compose = _load_yaml("compose.yaml")
     services = compose["services"]
 
-    assert {"web", "monitor", "api", "prometheus", "alertmanager", "grafana"}.issubset(
-        services.keys()
-    )
-    assert {"prometheus-data", "alertmanager-data", "grafana-data"}.issubset(
-        compose["volumes"].keys()
-    )
+    expected_services = {
+        "web",
+        "api",
+        "docker-socket-proxy",
+        "remediation-executor",
+        "nagios",
+    }
+    assert set(services.keys()) == expected_services
+    assert "nagios-data" in compose["volumes"]
     assert compose["networks"]["autoheal-network"]["name"] == "autoheal-network"
+    assert compose["networks"]["autoheal-control-network"]["internal"] is True
 
-    for svc_name in ("monitor", "api", "prometheus", "alertmanager", "grafana"):
+    for svc_name in expected_services:
         svc = services[svc_name]
         assert svc["read_only"] is True
         assert svc["cap_drop"] == ["ALL"]
         assert "no-new-privileges:true" in svc["security_opt"]
-        for vol in svc.get("volumes", []):
-            assert "/var/run/docker.sock" not in str(vol)
+        assert "mem_limit" in svc
+        assert "cpus" in svc
+        if svc_name != "docker-socket-proxy":
+            for vol in svc.get("volumes", []):
+                assert "/var/run/docker.sock" not in str(vol)
 
-    for svc_name in ("web", "prometheus", "alertmanager", "grafana"):
+    proxy = services["docker-socket-proxy"]
+    assert not proxy.get("ports")
+    assert proxy["networks"] == ["autoheal-control-network"]
+
+    executor = services["remediation-executor"]
+    assert not executor.get("ports")
+    assert executor["environment"]["DOCKER_HOST"] == "tcp://docker-socket-proxy:2375"
+
+    for svc_name in ("web", "api", "docker-socket-proxy", "remediation-executor", "nagios"):
         assert "healthcheck" in services[svc_name]
+
+    assert services["nagios"].get("init") is True
+    assert services["nagios"]["networks"] == ["autoheal-network"]
+    assert services["api"]["networks"] == ["autoheal-network"]
+    assert not services["api"].get("ports") or "autoheal-control-network" not in services["api"]["networks"]
+    assert "nagios4 -v" in (REPO_ROOT / "docker/nagios/entrypoint.sh").read_text(encoding="utf-8")
+
+    assert (REPO_ROOT / ".dockerignore").is_file()
+    proxy_conf = (REPO_ROOT / "docker/socket-proxy/nginx.conf").read_text(encoding="utf-8")
+    assert "merge_slashes off;" in proxy_conf
+    assert "server_tokens off;" in proxy_conf
+    assert r"(\.\.|//|%|\\|;|\?)" in proxy_conf
+    assert "^(/v[1-9][0-9]*\\.[0-9]+)?" in proxy_conf
+
+
+def test_documentation_and_templates_exclude_phase_references() -> None:
+    """Ensure student documentation avoids internal dev phase terminology."""
+    pattern = re.compile(r"\bphase\b", re.IGNORECASE)
+    for rel_path in ("README.md", ".env.example", "app/html/index.html"):
+        file_path = REPO_ROOT / rel_path
+        if file_path.is_file():
+            content = file_path.read_text(encoding="utf-8")
+            assert not pattern.search(content), f"Found unexpected phase mention in {rel_path}"
