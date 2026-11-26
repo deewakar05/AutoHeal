@@ -102,7 +102,7 @@ class RemediationSettings(BaseSettings):
     autoheal_ansible_playbook_path: str = Field(default="remediation/recover.yml")
     autoheal_ansible_inventory_path: str = Field(default="ansible/inventory.ini")
     autoheal_ansible_config_path: str = Field(default="ansible/ansible.cfg")
-    autoheal_ansible_executable: str = Field(default="ansible-playbook")
+    autoheal_ansible_executable: str = Field(default="/usr/local/bin/ansible-playbook")
     autoheal_remediation_executor_poll_interval: float = Field(default=1.0)
     autoheal_remediation_executor_heartbeat_path: str = Field(default="/tmp/executor.heartbeat")
     autoheal_remediation_require_isolation: bool = Field(default=True)
@@ -122,11 +122,53 @@ class RemediationSettings(BaseSettings):
     @field_validator("autoheal_remediation_verify_target_url")
     @classmethod
     def validate_verify_target_url(cls, value: str) -> str:
-        """Ensure recovery verification target URL is valid HTTP/HTTPS."""
+        """Ensure recovery verification target URL is valid, internal, and secure."""
         cleaned = value.strip()
         parsed = urlparse(cleaned)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise ValueError("AUTOHEAL_REMEDIATION_VERIFY_TARGET_URL must be a valid http or https URL")
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError(
+                "AUTOHEAL_REMEDIATION_VERIFY_TARGET_URL must use http or https scheme"
+            )
+        if parsed.username or parsed.password:
+            raise ValueError(
+                "AUTOHEAL_REMEDIATION_VERIFY_TARGET_URL must not contain credentials"
+            )
+        if parsed.query:
+            raise ValueError(
+                "AUTOHEAL_REMEDIATION_VERIFY_TARGET_URL must not contain query parameters"
+            )
+        if parsed.fragment:
+            raise ValueError(
+                "AUTOHEAL_REMEDIATION_VERIFY_TARGET_URL must not contain a fragment"
+            )
+        if parsed.path != "/health":
+            raise ValueError(
+                "AUTOHEAL_REMEDIATION_VERIFY_TARGET_URL path must be exactly '/health'"
+            )
+        hostname = (parsed.hostname or "").lower()
+        if not hostname:
+            raise ValueError(
+                "AUTOHEAL_REMEDIATION_VERIFY_TARGET_URL must include a valid hostname"
+            )
+        if hostname in {"localhost", "127.0.0.1", "::1", "[::1]"} or hostname.startswith("127."):
+            raise ValueError(
+                "AUTOHEAL_REMEDIATION_VERIFY_TARGET_URL must not target localhost or loopback"
+            )
+        approved_internal_hosts = {"web", "autoheal-web"}
+        if hostname not in approved_internal_hosts:
+            raise ValueError(
+                f"AUTOHEAL_REMEDIATION_VERIFY_TARGET_URL hostname {hostname!r} is not an "
+                f"approved internal target service (allowed: {sorted(approved_internal_hosts)})"
+            )
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("AUTOHEAL_REMEDIATION_VERIFY_TARGET_URL contains invalid port") from exc
+        if port is not None and port not in {80, 443}:
+            raise ValueError(
+                f"AUTOHEAL_REMEDIATION_VERIFY_TARGET_URL port {port} is disallowed; "
+                "only standard HTTP/HTTPS ports (80, 443) or default ports are permitted"
+            )
         return cleaned
 
     @field_validator(
@@ -286,6 +328,17 @@ class RemediationSettings(BaseSettings):
             raise ValueError(
                 f"Playbook {self.autoheal_ansible_playbook_path!r} is not in "
                 f"AUTOHEAL_REMEDIATION_APPROVED_PLAYBOOKS={list(self.autoheal_remediation_approved_playbooks)!r}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_verify_thresholds(self) -> RemediationSettings:
+        """Ensure required verification successes does not exceed total attempts."""
+        if self.autoheal_remediation_verify_required_successes > self.autoheal_remediation_verify_attempts:
+            raise ValueError(
+                f"AUTOHEAL_REMEDIATION_VERIFY_REQUIRED_SUCCESSES "
+                f"({self.autoheal_remediation_verify_required_successes}) cannot exceed "
+                f"AUTOHEAL_REMEDIATION_VERIFY_ATTEMPTS ({self.autoheal_remediation_verify_attempts})"
             )
         return self
 

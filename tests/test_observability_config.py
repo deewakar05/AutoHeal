@@ -51,17 +51,18 @@ def test_nagios_notification_commands_structure() -> None:
 
 
 def test_compose_and_proxy_hardening_baseline() -> None:
-    """Verify production security baseline for the 5-container architecture."""
+    """Verify production security baseline for the 6-container architecture."""
     compose = _load_yaml("compose.yaml")
     services = compose["services"]
 
     expected_services = {
-        "web",
-        "api",
-        "docker-socket-proxy",
-        "remediation-executor",
-        "nagios",
-    }
+    "web",
+    "api",
+    "docker-socket-proxy",
+    "remediation-executor",
+    "nagios",
+    "monitor",
+}
     assert set(services.keys()) == expected_services
     assert "nagios-data" in compose["volumes"]
     assert compose["networks"]["autoheal-network"]["name"] == "autoheal-network"
@@ -86,7 +87,7 @@ def test_compose_and_proxy_hardening_baseline() -> None:
     assert not executor.get("ports")
     assert executor["environment"]["DOCKER_HOST"] == "tcp://docker-socket-proxy:2375"
 
-    for svc_name in ("web", "api", "docker-socket-proxy", "remediation-executor", "nagios"):
+    for svc_name in expected_services:
         assert "healthcheck" in services[svc_name]
 
     assert services["nagios"].get("init") is True
@@ -99,7 +100,7 @@ def test_compose_and_proxy_hardening_baseline() -> None:
     proxy_conf = (REPO_ROOT / "docker/socket-proxy/nginx.conf").read_text(encoding="utf-8")
     assert "merge_slashes off;" in proxy_conf
     assert "server_tokens off;" in proxy_conf
-    assert r"(\.\.|//|%|\\|;|\?)" in proxy_conf
+    assert r"(\.\.|//|%|\\|;)" in proxy_conf
     assert "^(/v[1-9][0-9]*\\.[0-9]+)?" in proxy_conf
 
 

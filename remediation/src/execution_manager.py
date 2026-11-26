@@ -343,7 +343,13 @@ class ExecutionManager:
         """Execute a claimed RUNNING execution record cleanly and verify real recovery."""
         self._metrics_recorder.record_attempt(execution)
 
-        if decision.dry_run or execution.dry_run:
+        effective_dry_run = (
+    decision.dry_run
+    or execution.dry_run
+    or self._settings.autoheal_remediation_dry_run
+)
+
+        if effective_dry_run:
             completed = self._executor.complete_dry_run(execution, decision)
             self._metrics_recorder.record_terminal(
                 completed,
@@ -389,13 +395,9 @@ class ExecutionManager:
             state=self._empty_allowable_state(execution),
             current_time=utc_now(),
         )
-        if not gate_check.allowed and gate_check.reason in {
-            PolicyReason.INCIDENT_ALREADY_RESOLVED,
-            PolicyReason.INCIDENT_NOT_FOUND,
-            PolicyReason.SERVICE_NOT_ALLOWED,
-            PolicyReason.ACTION_NOT_ALLOWED,
-            PolicyReason.REMEDIATION_DISABLED,
-        }:
+        # Every policy denial is terminal here. Do not maintain a reason-code
+        # allowlist: a newly added denial reason must never fall through to Ansible.
+        if not gate_check.allowed:
             failed = self._persist_terminal(
                 execution.id,
                 RemediationStatus.FAILED,

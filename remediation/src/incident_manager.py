@@ -8,8 +8,10 @@ from pathlib import Path
 
 from .database import (
     CORE_MONITORING_SCHEMA_SQL,
+    ensure_autoheal_database,
     ensure_incident_columns,
     format_utc,
+    get_connection,
     parse_optional_dt,
 )
 from .models import (
@@ -44,22 +46,10 @@ class IncidentManager:
         self._init_db()
 
     def _connect(self, *, manual_transactions: bool = False) -> sqlite3.Connection:
-        isolation_level = None if manual_transactions else ""
-        conn = sqlite3.connect(self.db_path, timeout=5.0, isolation_level=isolation_level)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=5000")
-        return conn
+        return get_connection(self.db_path, manual_transactions=manual_transactions)
 
     def _init_db(self) -> None:
-        conn = self._connect()
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.executescript(SCHEMA_SQL)
-            ensure_incident_columns(conn)
-            conn.commit()
-        finally:
-            conn.close()
+        ensure_autoheal_database(self.db_path)
 
     def ensure_service_initialized(self, service_name: str, target_url: str) -> None:
         """Create an initial UNKNOWN status row if one does not yet exist."""

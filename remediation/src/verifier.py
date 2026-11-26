@@ -59,9 +59,12 @@ class RecoveryVerifier:
             raise ValueError("verify_interval must be a finite number > 0")
         if raw_required < 1:
             raise ValueError("required_successes must be >= 1")
+        if raw_required > max_attempts:
+            raise ValueError(
+                f"required_successes ({raw_required}) cannot exceed verify_attempts ({max_attempts})"
+            )
 
-        # Never require more consecutive successes than the configured verification budget.
-        effective_required = min(raw_required, max_attempts)
+        effective_required = raw_required
         resolved_url = target_url or self._settings.autoheal_remediation_verify_target_url
         started = time.monotonic()
 

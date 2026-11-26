@@ -451,6 +451,9 @@ class NagiosAlertService:
                 incident_created = False
                 is_flapping = bool(open_row["flapping"]) or bool(event.flapping)
 
+            # Keep the event, incident, policy decision, execution reservation,
+            # and final event status in ONE transaction. A process crash can no
+            # longer leave a deduplicated problem event without its queue slot.
             _insert_nagios_event(
                 conn,
                 event,
@@ -461,6 +464,51 @@ class NagiosAlertService:
                 received_iso=received_iso,
                 processing_status=initial_outcome.value,
             )
+            final_outcome = initial_outcome
+            remediation_queued = False
+            execution_id: int | None = None
+            dry_run_val: bool | None = self._settings.autoheal_remediation_dry_run
+            policy_reason: str | None = None
+            policy_details = ""
+
+            if is_flapping:
+                policy_reason = "FLAPPING_ACTIVE"
+                policy_details = "Automated remediation suppressed while flapping flag is active."
+            elif self._settings.autoheal_remediation_dispatch_mode == "disabled":
+                policy_reason = "DISPATCH_DISABLED"
+                policy_details = "Remediation dispatch mode is set to 'disabled'."
+            else:
+                reservation = self._repository.reserve_execution_in_tx(
+                    conn,
+                    RemediationRequest(
+                        incident_id=incident_id,
+                        service_name=mapped_service,
+                        action="restart",
+                    ),
+                    self._settings,
+                    initial_status=RemediationStatus.PENDING,
+                    stale_after_seconds=self._settings.autoheal_remediation_stale_timeout_seconds,
+                )
+                policy_reason = reservation.decision.reason.value
+                policy_details = reservation.decision.details
+                dry_run_val = reservation.decision.dry_run
+                if reservation.reserved and reservation.execution is not None:
+                    remediation_queued = True
+                    execution_id = reservation.execution.id
+                    final_outcome = NagiosProcessingOutcome.REMEDIATION_QUEUED
+
+            if final_outcome != initial_outcome:
+                conn.execute(
+                    "UPDATE nagios_events SET processing_status = ? WHERE dedup_key = ?",
+                    (final_outcome.value, dedup_key),
+                )
+            _record_nagios_counter_in_tx(
+                conn,
+                kind=kind,
+                notification_type=event.notification_type,
+                state=event.state,
+                outcome=final_outcome.value,
+            )
             conn.execute("COMMIT")
         except Exception:
             if conn.in_transaction:
@@ -468,63 +516,6 @@ class NagiosAlertService:
             raise
         finally:
             conn.close()
-
-        # Transaction 2: evaluate remediation policy and atomically reserve PENDING slot.
-        final_outcome = initial_outcome
-        remediation_queued = False
-        execution_id: int | None = None
-        dry_run_val: bool | None = self._settings.autoheal_remediation_dry_run
-        policy_reason: str | None = None
-        policy_details = ""
-
-        if is_flapping:
-            policy_reason = "FLAPPING_ACTIVE"
-            policy_details = "Automated remediation suppressed while flapping flag is active."
-        elif self._settings.autoheal_remediation_dispatch_mode == "disabled":
-            policy_reason = "DISPATCH_DISABLED"
-            policy_details = "Remediation dispatch mode is set to 'disabled'."
-        else:
-            reservation = self._repository.reserve_execution(
-                RemediationRequest(
-                    incident_id=incident_id,
-                    service_name=mapped_service,
-                    action="restart",
-                ),
-                self._settings,
-                initial_status=RemediationStatus.PENDING,
-                stale_after_seconds=self._settings.autoheal_remediation_stale_timeout_seconds,
-            )
-            policy_reason = reservation.decision.reason.value
-            policy_details = reservation.decision.details
-            dry_run_val = reservation.decision.dry_run
-            if reservation.reserved and reservation.execution is not None:
-                remediation_queued = True
-                execution_id = reservation.execution.id
-                final_outcome = NagiosProcessingOutcome.REMEDIATION_QUEUED
-
-        # Transaction 3: finalize nagios_events processing_status and Prometheus counter.
-        conn2 = get_connection(self.db_path, manual_transactions=True)
-        try:
-            conn2.execute("BEGIN IMMEDIATE")
-            if final_outcome != initial_outcome:
-                conn2.execute(
-                    "UPDATE nagios_events SET processing_status = ? WHERE dedup_key = ?",
-                    (final_outcome.value, dedup_key),
-                )
-            _record_nagios_counter_in_tx(
-                conn2,
-                kind=kind,
-                notification_type=event.notification_type,
-                state=event.state,
-                outcome=final_outcome.value,
-            )
-            conn2.execute("COMMIT")
-        except Exception:
-            if conn2.in_transaction:
-                conn2.execute("ROLLBACK")
-            raise
-        finally:
-            conn2.close()
 
         logger.info(
             "Processed critical Nagios alert",
@@ -618,15 +609,15 @@ class NagiosAlertService:
                 details="Stale Nagios recovery timestamp predates active problem; incident kept open.",
             )
 
-        running_row = conn.execute(
+        active_row = conn.execute(
             """
-            SELECT id FROM remediation_executions
-            WHERE incident_id = ? AND status = 'running'
+            SELECT id, status FROM remediation_executions
+            WHERE incident_id = ? AND status IN ('pending', 'running')
             ORDER BY id DESC LIMIT 1
             """,
             (open_id,),
         ).fetchone()
-        if running_row is not None:
+        if active_row is not None:
             outcome = NagiosProcessingOutcome.DEFERRED_ACTIVE_REMEDIATION
             conn.execute(
                 """
@@ -664,10 +655,11 @@ class NagiosAlertService:
                 dedup_key=dedup_key,
                 mapped_service=mapped_service,
                 incident_id=open_id,
-                execution_id=int(running_row["id"]),
+                execution_id=int(active_row["id"]),
                 details=(
-                    "Active remediation execution is RUNNING; deferring resolution "
-                    "until RecoveryVerifier completes."
+                    f"Active remediation execution is {str(active_row['status']).upper()}; "
+                    "deferring incident resolution until the execution lifecycle and "
+                    "RecoveryVerifier complete."
                 ),
             )
 

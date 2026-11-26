@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -16,6 +18,11 @@ from .models import (
 )
 
 REMEDIATION_SCHEMA_VERSION = 3
+
+# SQLite journal-mode changes are especially sensitive to concurrent initialization.
+# Serialize initializers within this process; bounded retries below also cover
+# contention from another process using the same database file.
+_DATABASE_INITIALIZATION_LOCK = threading.Lock()
 
 CORE_MONITORING_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS service_status (
@@ -295,33 +302,31 @@ def get_connection(
 
 def ensure_remediation_database(db_path: str) -> None:
     """Idempotently initialize remediation tables and indexes on the shared database."""
-    if db_path != ":memory:":
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    ensure_autoheal_database(db_path)
 
-    conn = get_connection(db_path, manual_transactions=True)
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.executescript(REMEDIATION_SCHEMA_SQL)
-        conn.execute("BEGIN IMMEDIATE")
-        ensure_incident_columns(conn)
-        conn.execute(
-            """
-            INSERT INTO remediation_schema_meta (schema_name, version, applied_at)
-            VALUES ('remediation', ?, ?)
-            ON CONFLICT(schema_name) DO UPDATE SET
-                version = CASE WHEN excluded.version > version THEN excluded.version ELSE version END,
-                applied_at = CASE WHEN excluded.version > version THEN excluded.applied_at ELSE applied_at END
-            """,
-            (REMEDIATION_SCHEMA_VERSION, format_utc(utc_now())),
-        )
-        conn.execute("COMMIT")
-    except Exception:
-        if conn.in_transaction:
-            conn.execute("ROLLBACK")
-        raise
-    finally:
-        conn.close()
+
+def _enable_wal_mode(
+    conn: sqlite3.Connection,
+    *,
+    retry_timeout_seconds: float = 10.0,
+) -> None:
+    """Enable WAL, retrying transient lock contention from other processes."""
+    deadline = time.monotonic() + retry_timeout_seconds
+    delay_seconds = 0.05
+
+    while True:
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            if not any(token in message for token in ("database is locked", "database is busy")):
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(delay_seconds, remaining))
+            delay_seconds = min(delay_seconds * 2, 0.5)
 
 
 def ensure_autoheal_database(db_path: str) -> None:
@@ -329,15 +334,33 @@ def ensure_autoheal_database(db_path: str) -> None:
     if db_path != ":memory:":
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
-    conn = get_connection(db_path)
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.executescript(CORE_MONITORING_SCHEMA_SQL)
-        conn.commit()
-    finally:
-        conn.close()
-    ensure_remediation_database(db_path)
+    # Keep same-process initializers from racing on WAL mode and schema DDL.
+    with _DATABASE_INITIALIZATION_LOCK:
+        conn = get_connection(db_path, manual_transactions=True)
+        try:
+            _enable_wal_mode(conn)
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.executescript(CORE_MONITORING_SCHEMA_SQL)
+            conn.executescript(REMEDIATION_SCHEMA_SQL)
+            conn.execute("BEGIN IMMEDIATE")
+            ensure_incident_columns(conn)
+            conn.execute(
+                """
+                INSERT INTO remediation_schema_meta (schema_name, version, applied_at)
+                VALUES ('remediation', ?, ?)
+                ON CONFLICT(schema_name) DO UPDATE SET
+                    version = CASE WHEN excluded.version > version THEN excluded.version ELSE version END,
+                    applied_at = CASE WHEN excluded.version > version THEN excluded.applied_at ELSE applied_at END
+                """,
+                (REMEDIATION_SCHEMA_VERSION, format_utc(utc_now())),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
 
 
 def increment_sql_counter(

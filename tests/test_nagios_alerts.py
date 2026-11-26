@@ -327,8 +327,12 @@ def test_nagios_coexists_with_internal_monitor_without_duplicate_incidents(tmp_p
     assert inc2[0].source == "internal_monitor+nagios"
 
 
-def test_nagios_recovery_ordering_flapping_and_active_remediation_deferral(tmp_path: Path) -> None:
-    db_path = str(tmp_path / "autoheal.db")
+
+def test_nagios_recovery_defers_while_remediation_is_pending(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "pending_recovery.db")
+
     settings = RemediationSettings(
         _env_file=None,
         autoheal_db_path=db_path,
@@ -336,95 +340,67 @@ def test_nagios_recovery_ordering_flapping_and_active_remediation_deferral(tmp_p
         autoheal_remediation_dry_run=False,
         autoheal_remediation_dispatch_mode="queue",
     )
+
     svc = NagiosAlertService(settings)
     repo = RemediationRepository(db_path)
 
-    # 1. Recovery when no open incident exists -> ignored cleanly.
-    no_open = svc.process_alert(
+    # 1. Create a critical problem and reserve remediation.
+    problem = svc.process_alert(
+        NagiosAlertEvent(
+            **_problem_payload(
+                event_timestamp="2026-11-11T12:10:00Z",
+                event_id="prob-pending-recovery",
+            )
+        )
+    )
+
+    assert problem.remediation_queued is True
+    assert problem.execution_id is not None
+
+    # Confirm the execution has NOT been claimed by a worker.
+    executions = repo.list_executions()
+    assert len(executions) == 1
+    assert executions[0].status == RemediationStatus.PENDING
+
+    # 2. Nagios reports recovery while execution is still pending.
+    recovery = svc.process_alert(
         NagiosAlertEvent(
             **_problem_payload(
                 notification_type="RECOVERY",
                 state="OK",
-                event_timestamp="2026-11-11T12:00:00Z",
-                event_id="rec-none",
-            )
-        )
-    )
-    assert no_open.outcome == NagiosProcessingOutcome.IGNORED_NO_OPEN_INCIDENT
-
-    # 2. Flapping marks incident and blocks queuing.
-    svc.process_alert(
-        NagiosAlertEvent(
-            **_problem_payload(
-                event_timestamp="2026-11-11T12:01:00Z",
-                flapping=True,
-                event_id="prob-flap",
-            )
-        )
-    )
-    assert len(repo.list_executions()) == 0
-    svc.process_alert(
-        NagiosAlertEvent(
-            **_problem_payload(
-                notification_type="FLAPPINGSTOP",
-                state="CRITICAL",
-                event_timestamp="2026-11-11T12:01:10Z",
-                event_id="flap-stop",
+                event_timestamp="2026-11-11T12:10:10Z",
+                event_id="rec-while-pending",
             )
         )
     )
 
-    # 3. Stale recovery older than last_problem_at -> rejected without resolving.
-    stale = svc.process_alert(
-        NagiosAlertEvent(
-            **_problem_payload(
-                notification_type="RECOVERY",
-                state="OK",
-                event_timestamp="2026-11-11T11:59:00Z",
-                event_id="rec-stale",
-            )
-        )
+    # 3. Recovery must be deferred, not resolve the incident.
+    assert (
+        recovery.outcome
+        == NagiosProcessingOutcome.DEFERRED_ACTIVE_REMEDIATION
     )
-    assert stale.outcome == NagiosProcessingOutcome.IGNORED_STALE_RECOVERY
+    assert recovery.incident_resolved is False
 
-    # 4. Active RUNNING remediation -> recovery defers resolution to RecoveryVerifier.
-    queued = svc.process_alert(
-        NagiosAlertEvent(
-            **_problem_payload(
-                event_timestamp="2026-11-11T12:01:20Z",
-                event_id="prob-after-flap",
-            )
-        )
-    )
-    assert queued.remediation_queued is True
-    assert repo.claim_pending_execution(queued.execution_id) is not None
+    # 4. The queued execution must remain pending.
+    executions_after = repo.list_executions()
+    assert len(executions_after) == 1
+    assert executions_after[0].status == RemediationStatus.PENDING
 
-    deferred = svc.process_alert(
-        NagiosAlertEvent(
-            **_problem_payload(
-                notification_type="RECOVERY",
-                state="OK",
-                event_timestamp="2026-11-11T12:01:30Z",
-                event_id="rec-during-running",
-            )
-        )
-    )
-    assert deferred.outcome == NagiosProcessingOutcome.DEFERRED_ACTIVE_REMEDIATION
+    # 5. The incident must remain open and unresolved.
+    with sqlite3.connect(db_path) as conn:
+        incident = conn.execute(
+            """
+            SELECT status, resolved_at
+            FROM incidents
+            WHERE id = ?
+            """,
+            (problem.incident_id,),
+        ).fetchone()
 
-    # 5. Once no RUNNING remediation is active, valid non-stale RECOVERY resolves cleanly.
-    repo.update_status(queued.execution_id, RemediationStatus.FAILED, failure_reason="test-end")
-    resolved = svc.process_alert(
-        NagiosAlertEvent(
-            **_problem_payload(
-                notification_type="RECOVERY",
-                state="OK",
-                event_timestamp="2026-11-11T12:02:00Z",
-                event_id="rec-valid",
-            )
-        )
-    )
-    assert resolved.outcome == NagiosProcessingOutcome.INCIDENT_RESOLVED
-    assert resolved.incident_resolved is True
+    assert incident is not None
+    assert incident[0] == "open"
+    assert incident[1] is None
+
 
 
 def test_nagios_policy_gates_block_disallowed_disabled_cooldown_and_max_attempts(

@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from remediation.src.incident_manager import IncidentManager
 from remediation.src.metrics import MonitorMetrics
 from remediation.src.models import (
@@ -12,6 +14,7 @@ from remediation.src.models import (
     HealthCheckResult,
     IncidentStatus,
     ServiceState,
+    StateEvaluation,
 )
 
 
@@ -97,3 +100,78 @@ def test_recovery_threshold_resolves_incident_and_persists_across_restart(tmp_pa
     prom_text = metrics.render_prometheus()
     assert "autoheal_health_checks_total" in prom_text
     assert "autoheal_service_up" in prom_text
+
+
+def test_incident_manager_connection_enforces_foreign_keys(tmp_path: Path) -> None:
+    import sqlite3
+    db_path = str(tmp_path / "fk.db")
+    manager = IncidentManager(db_path=db_path, failure_threshold=2, recovery_threshold=2)
+
+    conn = manager._connect()
+    try:
+        fk_status = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+        assert fk_status == 1
+
+        # Attempting an insert with invalid foreign key reference must fail closed
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            conn.execute(
+                """
+                INSERT INTO remediation_executions (
+                    incident_id, service_name, action, status, attempt_number,
+                    dry_run, created_at
+                ) VALUES (999999, 'web', 'restart', 'pending', 1, 1, '2026-01-01T00:00:00Z')
+                """
+            )
+    finally:
+        conn.close()
+
+
+def test_metrics_in_memory_state_unmodified_when_sqlite_fails(tmp_path: Path) -> None:
+    import sqlite3
+    from unittest.mock import patch
+
+    db_path = str(tmp_path / "metrics_fail.db")
+    metrics = MonitorMetrics(db_path=db_path)
+
+    initial_checks = metrics.checks_total.labels(service="web", outcome="success")._value.get()
+    initial_incidents = metrics.incidents_total.labels(service="web", event="resolved")._value.get()
+
+    # When SQLite persistence fails, in-memory counter must not be incremented
+    with patch.object(metrics, "_persist_to_sqlite", side_effect=sqlite3.OperationalError("database is locked")):
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            metrics.record(_make_result(True), StateEvaluation(
+                previous_state=ServiceState.HEALTHY,
+                current_state=ServiceState.HEALTHY,
+                state_changed=False,
+                consecutive_failures=0,
+                consecutive_successes=1,
+            ))
+
+    assert metrics.checks_total.labels(service="web", outcome="success")._value.get() == initial_checks
+
+    with patch.object(metrics, "record_incident_resolved_in_tx", side_effect=sqlite3.OperationalError("disk I/O error")):
+        with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
+            metrics.record_incident_resolved("web")
+
+    assert metrics.incidents_total.labels(service="web", event="resolved")._value.get() == initial_incidents
+
+
+def test_concurrent_database_schema_initialization(tmp_path: Path) -> None:
+    import concurrent.futures
+    from remediation.src.database import ensure_autoheal_database, get_connection
+
+    db_path = str(tmp_path / "concurrent_init.db")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(ensure_autoheal_database, db_path) for _ in range(5)]
+        for f in futures:
+            f.result()
+
+    conn = get_connection(db_path)
+    try:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        assert "incidents" in tables
+        assert "service_status" in tables
+        assert "remediation_executions" in tables
+        assert "nagios_events" in tables
+    finally:
+        conn.close()

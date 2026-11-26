@@ -654,11 +654,49 @@ class RemediationRepository:
         stale_after_seconds: float | None = None,
         now: datetime | None = None,
     ) -> ReservationResult:
-        """Atomically revalidate policy gates and reserve an execution slot under BEGIN IMMEDIATE."""
+        """Atomically evaluate policy gates and reserve an execution slot."""
+        conn = get_connection(self.db_path, manual_transactions=True)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            result = self.reserve_execution_in_tx(
+                conn,
+                request,
+                settings,
+                initial_status=initial_status,
+                stale_after_seconds=stale_after_seconds,
+                now=now,
+            )
+            conn.execute("COMMIT")
+            return result
+        except Exception:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
+
+    def reserve_execution_in_tx(
+        self,
+        conn: sqlite3.Connection,
+        request: RemediationRequest,
+        settings: RemediationSettings,
+        *,
+        initial_status: RemediationStatus = RemediationStatus.RUNNING,
+        stale_after_seconds: float | None = None,
+        now: datetime | None = None,
+    ) -> ReservationResult:
+        """Evaluate policy and reserve using a caller-owned transaction.
+
+        The caller must hold a write transaction (BEGIN IMMEDIATE). This allows
+        an incoming event, its incident, its remediation reservation, and its
+        final processing status to commit or roll back as one unit.
+        """
         if initial_status not in ACTIVE_REMEDIATION_STATUSES:
             raise ValueError(
                 f"initial_status must be one of {[s.value for s in ACTIVE_REMEDIATION_STATUSES]}"
             )
+        if not conn.in_transaction:
+            raise RuntimeError("reserve_execution_in_tx requires an active caller-owned transaction")
 
         current_time = ensure_utc(now or utc_now())
         effective_stale_seconds = (
@@ -666,13 +704,16 @@ class RemediationRepository:
             if stale_after_seconds is None
             else stale_after_seconds
         )
+        # Validate before creating the savepoint so invalid input cannot leave
+        # a savepoint open in a caller-owned transaction.
         if effective_stale_seconds <= 0:
             raise ValueError("stale_after_seconds must be greater than 0")
 
-        conn = get_connection(self.db_path, manual_transactions=True)
+        # Isolate reservation-specific writes. A policy denial or an exception
+        # must not leave stale-row recovery changes in the caller's transaction.
+        savepoint_name = "autoheal_reservation"
+        conn.execute(f"SAVEPOINT {savepoint_name}")
         try:
-            conn.execute("BEGIN IMMEDIATE")
-
             if request.incident_id > 0:
                 self._recover_stale_in_tx(
                     conn,
@@ -701,14 +742,22 @@ class RemediationRepository:
                 current_time=current_time,
             )
             if not decision.allowed:
-                conn.execute("ROLLBACK")
-                return ReservationResult(reserved=False, decision=decision, execution=None)
+                conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
+                conn.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+                return ReservationResult(
+                    reserved=False,
+                    decision=decision,
+                    execution=None,
+                )
 
             max_row = conn.execute(
-                "SELECT COALESCE(MAX(attempt_number), 0) AS max_attempt FROM remediation_executions WHERE incident_id = ?",
+                "SELECT COALESCE(MAX(attempt_number), 0) AS max_attempt "
+                "FROM remediation_executions WHERE incident_id = ?",
                 (decision.incident_id,),
             ).fetchone()
-            next_attempt = (int(max_row["max_attempt"]) if max_row is not None else 0) + 1
+            next_attempt = (
+                int(max_row["max_attempt"]) if max_row is not None else 0
+            ) + 1
             now_iso = format_utc(current_time)
             started_iso = now_iso if initial_status == RemediationStatus.RUNNING else None
 
@@ -735,19 +784,29 @@ class RemediationRepository:
                 "SELECT * FROM remediation_executions WHERE id = ?",
                 (cursor.lastrowid,),
             ).fetchone()
-            conn.execute("COMMIT")
-            assert created_row is not None
-            return ReservationResult(
+            if created_row is None:
+                raise RuntimeError("Reserved remediation execution could not be read back")
+
+            # Construct the return value before releasing the savepoint. If
+            # conversion fails, the reservation insert is still rolled back.
+            result = ReservationResult(
                 reserved=True,
                 decision=decision,
                 execution=row_to_execution(created_row),
             )
-        except Exception:
-            if conn.in_transaction:
-                conn.execute("ROLLBACK")
+            conn.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+            return result
+        except BaseException:
+            # Preserve the original exception if SQLite cleanup itself fails.
+            try:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
+            except sqlite3.Error:
+                pass
+            try:
+                conn.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+            except sqlite3.Error:
+                pass
             raise
-        finally:
-            conn.close()
 
     @staticmethod
     def _recover_stale_in_tx(

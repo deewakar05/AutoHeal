@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import shutil
 import signal
 import subprocess
 import threading
@@ -275,20 +276,10 @@ class AnsibleRunner:
             },
             separators=(",", ":"),
         )
-        argv = [
-            chosen_executable,
-            "-i",
-            str(inventory_file),
-            str(playbook_file),
-            "-e",
-            payload_vars,
-        ]
-        if check_mode:
-            argv.append("--check")
 
         # Minimal curated subprocess environment (never inherit parent secrets/tokens).
         child_env = {
-            "PATH": os.getenv("PATH", "/usr/local/bin:/usr/bin:/bin"),
+            "PATH": os.getenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
             "HOME": "/tmp",
             "LANG": "C.UTF-8",
             "LC_ALL": "C.UTF-8",
@@ -305,6 +296,26 @@ class AnsibleRunner:
             if _DISALLOWED_CONTROL_CHARS_RE.search(docker_host):
                 raise ValueError("DOCKER_HOST contains disallowed control characters")
             child_env["DOCKER_HOST"] = docker_host
+
+        # Resolve executable to verified absolute path.
+        resolved_executable = chosen_executable
+        if not Path(chosen_executable).is_file():
+            found = shutil.which(Path(chosen_executable).name, path=child_env["PATH"])
+            if found:
+                resolved_executable = str(Path(found).resolve())
+        else:
+            resolved_executable = str(Path(chosen_executable).resolve())
+
+        argv = [
+            resolved_executable,
+            "-i",
+            str(inventory_file),
+            str(playbook_file),
+            "-e",
+            payload_vars,
+        ]
+        if check_mode:
+            argv.append("--check")
 
         return argv, child_env, workspace_root.resolve(), chosen_playbook
 

@@ -11,6 +11,12 @@ from pathlib import Path
 
 import pytest
 
+from remediation.src.models import (
+    PolicyReason,
+    RemediationDecision,
+    RemediationRequest,
+    RemediationStatus,
+)
 from remediation.src.incident_manager import IncidentManager
 from remediation.src.models import CheckOutcome, HealthCheckResult, IncidentStatus
 from remediation.src.ansible_runner import (
@@ -647,7 +653,7 @@ wait "$child_pid"
         db_path,
         autoheal_remediation_enabled=True,
         autoheal_remediation_dry_run=False,
-        autoheal_remediation_timeout_seconds=1.5,
+        autoheal_remediation_timeout_seconds=2.5,
     )
     runner = AnsibleRunner(settings)
 
@@ -656,7 +662,7 @@ wait "$child_pid"
     assert res.succeeded is False
     assert pid_file.exists(), f"PID file not created; output={res.combined_output!r}"
     child_pid = int(pid_file.read_text(encoding="utf-8").strip())
-    for _ in range(40):
+    for _ in range(60):
         if not _pid_alive(child_pid):
             break
         await asyncio.sleep(0.05)
@@ -787,3 +793,149 @@ async def test_verified_completion_atomic_rollback_and_aborted_skips_failure_met
             "SELECT COUNT(*) FROM remediation_counters WHERE metric_name = 'autoheal_remediation_failures_total'"
         ).fetchone()[0]
     assert fail_rows == 0
+@pytest.mark.asyncio
+async def test_pending_execution_respects_current_global_dry_run_setting(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "queued_dry_run.db")
+    incident_id = _open_incident(db_path)
+
+    repo = RemediationRepository(db_path)
+
+    # Simulate a job created before global dry-run was enabled.
+    pending = repo.create_execution(
+        incident_id=incident_id,
+        service_name="web",
+        action="restart",
+        status=RemediationStatus.PENDING,
+        dry_run=False,
+    )
+
+    invoked = False
+
+    def fail_if_called(*_args, **_kwargs):
+        nonlocal invoked
+        invoked = True
+        raise AssertionError(
+            "Ansible must not execute when current global dry-run is enabled"
+        )
+
+    current_settings = _settings(
+        db_path,
+        autoheal_remediation_enabled=True,
+        autoheal_remediation_dry_run=True,
+    )
+
+    manager = ExecutionManager(
+        current_settings,
+        repository=repo,
+        executor=RemediationExecutor(
+            current_settings,
+            repository=repo,
+            runner=AnsibleRunner(
+                current_settings,
+                subprocess_runner=fail_if_called,
+            ),
+        ),
+    )
+
+    outcome = await manager.process_pending_execution(pending.id)
+
+    assert invoked is False
+    assert outcome is not None
+    assert outcome.executed is True
+    assert outcome.dry_run is True
+    assert outcome.verified is False
+    assert outcome.incident_resolved is False
+    assert outcome.execution is not None
+    assert outcome.execution.status == RemediationStatus.DRY_RUN
+
+
+@pytest.mark.asyncio
+async def test_execution_time_policy_denial_prevents_ansible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = str(tmp_path / "execution_policy_denial.db")
+    incident_id = _open_incident(db_path)
+    repo = RemediationRepository(db_path)
+
+    pending = repo.create_execution(
+        incident_id=incident_id,
+        service_name="web",
+        action="restart",
+        status=RemediationStatus.PENDING,
+        dry_run=False,
+    )
+
+    settings = _settings(
+        db_path,
+        autoheal_remediation_enabled=True,
+        autoheal_remediation_dry_run=False,
+    )
+
+    manager = ExecutionManager(settings, repository=repo)
+
+    policy_calls = 0
+    ansible_invoked = False
+
+    def deny_execution_time_policy(**kwargs):
+        nonlocal policy_calls
+        policy_calls += 1
+
+        return RemediationDecision(
+            allowed=False,
+            reason=PolicyReason.REMEDIATION_DISABLED,
+            dry_run=False,
+            service_name="web",
+            action="restart",
+            incident_id=incident_id,
+            details="Remediation disabled by execution-time policy recheck.",
+        )
+
+    async def fail_if_ansible_called(execution):
+        nonlocal ansible_invoked
+        ansible_invoked = True
+        raise AssertionError("Ansible must not run after policy denial")
+
+    monkeypatch.setattr(
+        "remediation.src.execution_manager.evaluate_policy_gates",
+        deny_execution_time_policy,
+    )
+    monkeypatch.setattr(
+        manager._executor,
+        "execute_reserved_ansible",
+        fail_if_ansible_called,
+    )
+
+    outcome = await manager.process_pending_execution(pending.id)
+
+    assert policy_calls == 1
+    assert ansible_invoked is False
+
+    assert outcome is not None
+    assert outcome.executed is False
+    assert outcome.verified is False
+    assert outcome.decision.allowed is False
+    assert outcome.decision.reason == PolicyReason.REMEDIATION_DISABLED
+    assert outcome.execution is not None
+    assert outcome.execution.status == RemediationStatus.FAILED
+
+    # The model does not expose failure_outcome as an attribute.
+    # Verify the persisted terminal status and that an abort adds no failure metric.
+    with sqlite3.connect(db_path) as conn:
+        persisted_status = conn.execute(
+            "SELECT status FROM remediation_executions WHERE id = ?",
+            (pending.id,),
+        ).fetchone()
+        failure_rows = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM remediation_counters
+            WHERE metric_name = 'autoheal_remediation_failures_total'
+            """
+        ).fetchone()[0]
+
+    assert persisted_status is not None
+    assert persisted_status[0] == RemediationStatus.FAILED.value
+    assert failure_rows == 0

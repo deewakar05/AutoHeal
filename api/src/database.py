@@ -10,6 +10,7 @@ from pathlib import Path
 from remediation.src.database import (
     CORE_MONITORING_SCHEMA_SQL,
     ensure_autoheal_database,
+    get_connection as _get_shared_connection,
 )
 
 _INIT_LOCK = threading.Lock()
@@ -38,11 +39,8 @@ def ensure_database(db_path: str) -> None:
 
 
 def get_connection(db_path: str) -> sqlite3.Connection:
-    """Open a SQLite connection configured with row factory and busy timeout."""
-    conn = sqlite3.connect(db_path, timeout=5.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=5000")
-    return conn
+    """Open a SQLite connection configured with row factory, foreign keys, and busy timeout."""
+    return _get_shared_connection(db_path)
 
 
 def check_database_health(db_path: str) -> bool:

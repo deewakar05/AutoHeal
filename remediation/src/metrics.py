@@ -8,7 +8,7 @@ from pathlib import Path
 
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
 
-from .database import increment_sql_counter, record_incident_event_in_tx
+from .database import get_connection, increment_sql_counter, record_incident_event_in_tx
 
 DURATION_BUCKETS: tuple[float, ...] = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0)
 
@@ -60,9 +60,7 @@ class MonitorMetrics:
         )
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=5.0, isolation_level=None)
-        conn.execute("PRAGMA busy_timeout=5000")
-        return conn
+        return get_connection(self.db_path, manual_transactions=True)
 
     @staticmethod
     def record_incident_resolved_in_tx(conn: sqlite3.Connection, service: str) -> None:
@@ -71,7 +69,6 @@ class MonitorMetrics:
 
     def record_incident_resolved(self, service: str) -> None:
         """Persist a single resolved-incident counter increment to SQLite."""
-        self.incidents_total.labels(service=service, event="resolved").inc()
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -83,31 +80,34 @@ class MonitorMetrics:
             raise
         finally:
             conn.close()
+        self.incidents_total.labels(service=service, event="resolved").inc()
 
     def record(self, result, evaluation) -> None:
         """Record check outcome and evaluation gauges."""
         outcome_label = result.outcome.value if hasattr(result.outcome, "value") else str(result.outcome)
-        self.checks_total.labels(service=result.service_name, outcome=outcome_label).inc()
-        self.service_up.labels(service=result.service_name).set(1.0 if result.healthy else 0.0)
-        self.consecutive_failures.labels(service=result.service_name).set(evaluation.consecutive_failures)
-        self.consecutive_successes.labels(service=result.service_name).set(evaluation.consecutive_successes)
+        duration_seconds = max((result.response_time_ms or 0.0) / 1000.0, 0.0)
 
         incident_events: list[str] = []
         if evaluation.incident_created is not None:
-            self.incidents_total.labels(service=result.service_name, event="created").inc()
             incident_events.append("created")
         if evaluation.incident_resolved is not None:
-            self.incidents_total.labels(service=result.service_name, event="resolved").inc()
             incident_events.append("resolved")
 
-        duration_seconds = max((result.response_time_ms or 0.0) / 1000.0, 0.0)
-        self.check_duration_seconds.labels(service=result.service_name).observe(duration_seconds)
+        # Persist to SQLite first within transaction; update in-memory metrics on success
         self._persist_to_sqlite(
             service=result.service_name,
             outcome=outcome_label,
             duration_seconds=duration_seconds,
             incident_events=incident_events,
         )
+
+        self.checks_total.labels(service=result.service_name, outcome=outcome_label).inc()
+        self.service_up.labels(service=result.service_name).set(1.0 if result.healthy else 0.0)
+        self.consecutive_failures.labels(service=result.service_name).set(evaluation.consecutive_failures)
+        self.consecutive_successes.labels(service=result.service_name).set(evaluation.consecutive_successes)
+        for event in incident_events:
+            self.incidents_total.labels(service=result.service_name, event=event).inc()
+        self.check_duration_seconds.labels(service=result.service_name).observe(duration_seconds)
 
     def render_prometheus(self) -> str:
         """Render in-process Prometheus exposition text."""

@@ -20,6 +20,8 @@ def test_remediation_settings_safe_defaults() -> None:
     assert settings.autoheal_allowed_actions == ("restart",)
     assert settings.autoheal_remediation_verify_interval == 5.0
     assert settings.autoheal_remediation_verify_attempts == 6
+    assert settings.autoheal_remediation_verify_required_successes == 2
+    assert settings.autoheal_ansible_executable == "/usr/local/bin/ansible-playbook"
     assert settings.autoheal_db_path == "/data/autoheal.db"
 
 
@@ -130,6 +132,19 @@ def test_remediation_settings_allows_custom_db_path_env_override(
         {"autoheal_remediation_allowed_proxy_port": 70000},
         {"autoheal_remediation_allowed_proxy_port": True},
         {"autoheal_remediation_verify_target_url": "ftp://web/health"},
+        {"autoheal_remediation_verify_target_url": "http://example.com/health"},
+        {"autoheal_remediation_verify_target_url": "http://localhost/health"},
+        {"autoheal_remediation_verify_target_url": "http://127.0.0.1/health"},
+        {"autoheal_remediation_verify_target_url": "http://[::1]/health"},
+        {"autoheal_remediation_verify_target_url": "http://web:8080/health"},
+        {"autoheal_remediation_verify_target_url": "http://user:pass@web/health"},
+        {"autoheal_remediation_verify_target_url": "http://web/status"},
+        {"autoheal_remediation_verify_target_url": "http://web/health?token=abc"},
+        {"autoheal_remediation_verify_target_url": "http://web/health#section"},
+        {
+            "autoheal_remediation_verify_attempts": 2,
+            "autoheal_remediation_verify_required_successes": 3,
+        },
         {"autoheal_remediation_dispatch_mode": "invalid_mode"},
         {"autoheal_remediation_approved_playbooks": "../outside.yml"},
         {"autoheal_ansible_playbook_path": "remediation/unapproved.yml"},
@@ -143,3 +158,18 @@ def test_remediation_settings_rejects_unsafe_execution_fields(
 ) -> None:
     with pytest.raises(ValidationError):
         RemediationSettings(_env_file=None, **overrides)
+
+
+@pytest.mark.parametrize(
+    "valid_url",
+    [
+        "http://web/health",
+        "https://web/health",
+        "http://autoheal-web/health",
+        "http://web:80/health",
+        "https://web:443/health",
+    ],
+)
+def test_remediation_settings_accepts_valid_verify_target_urls(valid_url: str) -> None:
+    settings = RemediationSettings(_env_file=None, autoheal_remediation_verify_target_url=valid_url)
+    assert settings.autoheal_remediation_verify_target_url == valid_url

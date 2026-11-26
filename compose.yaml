@@ -1,3 +1,4 @@
+
 services:
   web:
     image: nginx:alpine
@@ -168,6 +169,72 @@ services:
     networks:
       - autoheal-network
       - autoheal-control-network
+
+  monitor:
+    build:
+      context: .
+      dockerfile: docker/monitor.Dockerfile
+    container_name: autoheal-monitor
+    environment:
+      AUTOHEAL_DB_PATH: "${AUTOHEAL_DB_PATH:-/data/autoheal.db}"
+
+      MONITOR_ENABLED: "${MONITOR_ENABLED:-true}"
+      MONITOR_TARGET_URL: "${MONITOR_TARGET_URL:-http://web/health}"
+      MONITOR_TARGET_SERVICE: "${MONITOR_TARGET_SERVICE:-web}"
+      MONITOR_INTERVAL: "${MONITOR_INTERVAL:-5}"
+      MONITOR_TIMEOUT: "${MONITOR_TIMEOUT:-3}"
+      MONITOR_FAILURE_THRESHOLD: "${MONITOR_FAILURE_THRESHOLD:-3}"
+      MONITOR_RECOVERY_THRESHOLD: "${MONITOR_RECOVERY_THRESHOLD:-2}"
+      HEARTBEAT_PATH: "/tmp/monitor.heartbeat"
+
+      NAGIOS_MONITOR_ENABLED: "${NAGIOS_MONITOR_ENABLED:-true}"
+      NAGIOS_STATUS_URL: "${NAGIOS_STATUS_URL:-http://nagios:8081/nagios4/cgi-bin/statusjson.cgi?query=programstatus}"
+      NAGIOS_ADMIN_USER: "${NAGIOS_ADMIN_USER:-nagiosadmin}"
+      NAGIOS_ADMIN_PASSWORD: "${NAGIOS_ADMIN_PASSWORD:-}"
+      NAGIOS_PROBE_TIMEOUT: "${NAGIOS_PROBE_TIMEOUT:-3}"
+
+      AUTOHEAL_REMEDIATION_ENABLED: "${AUTOHEAL_REMEDIATION_ENABLED:-false}"
+      AUTOHEAL_REMEDIATION_DRY_RUN: "${AUTOHEAL_REMEDIATION_DRY_RUN:-true}"
+      AUTOHEAL_REMEDIATION_COOLDOWN_SECONDS: "${AUTOHEAL_REMEDIATION_COOLDOWN_SECONDS:-300}"
+      AUTOHEAL_REMEDIATION_MAX_ATTEMPTS: "${AUTOHEAL_REMEDIATION_MAX_ATTEMPTS:-3}"
+      AUTOHEAL_REMEDIATION_TIMEOUT_SECONDS: "${AUTOHEAL_REMEDIATION_TIMEOUT_SECONDS:-120}"
+      AUTOHEAL_REMEDIATION_STALE_TIMEOUT_SECONDS: "${AUTOHEAL_REMEDIATION_STALE_TIMEOUT_SECONDS:-180}"
+      AUTOHEAL_REMEDIATION_MAX_CONCURRENCY: "${AUTOHEAL_REMEDIATION_MAX_CONCURRENCY:-1}"
+      AUTOHEAL_ALLOWED_SERVICES: "${AUTOHEAL_ALLOWED_SERVICES:-web}"
+      AUTOHEAL_ALLOWED_ACTIONS: "${AUTOHEAL_ALLOWED_ACTIONS:-restart}"
+      AUTOHEAL_REMEDIATION_VERIFY_INTERVAL: "${AUTOHEAL_REMEDIATION_VERIFY_INTERVAL:-5}"
+      AUTOHEAL_REMEDIATION_VERIFY_ATTEMPTS: "${AUTOHEAL_REMEDIATION_VERIFY_ATTEMPTS:-6}"
+      AUTOHEAL_REMEDIATION_VERIFY_REQUIRED_SUCCESSES: "${AUTOHEAL_REMEDIATION_VERIFY_REQUIRED_SUCCESSES:-2}"
+      AUTOHEAL_REMEDIATION_VERIFY_TARGET_URL: "${AUTOHEAL_REMEDIATION_VERIFY_TARGET_URL:-http://web/health}"
+      AUTOHEAL_REMEDIATION_DISPATCH_MODE: "${AUTOHEAL_REMEDIATION_DISPATCH_MODE:-queue}"
+
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+    volumes:
+      - ./remediation/src:/workspace/remediation/src:ro
+      - ./data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 128m
+    cpus: "0.25"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,time,sys; p='/tmp/monitor.heartbeat'; age=float(os.getenv('MONITOR_INTERVAL','5'))*3+15; sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p)<age else 1)"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+    depends_on:
+      web:
+        condition: service_started
+      nagios:
+        condition: service_started
+    networks:
+      - autoheal-network
 
   nagios:
     build:

@@ -63,21 +63,31 @@ class MonitoringEngine:
 
     def touch_heartbeat(self) -> None:
         """Update heartbeat file timestamp for Docker container health checks."""
-        heartbeat = Path(self.settings.heartbeat_path)
-        heartbeat.parent.mkdir(parents=True, exist_ok=True)
-        heartbeat.touch()
+        try:
+            heartbeat = Path(self.settings.heartbeat_path)
+            heartbeat.parent.mkdir(parents=True, exist_ok=True)
+            heartbeat.touch()
+        except OSError:
+            logger.warning(
+                "Failed to update monitoring heartbeat at %s",
+                self.settings.heartbeat_path,
+                exc_info=True,
+                extra={"event": "monitor_heartbeat_failed"},
+            )
 
     async def run_once(self) -> StateEvaluation:
         """Execute a single monitoring cycle and return the resulting evaluation."""
-        result = await self.health_checker.check()
-        evaluation = self.incident_manager.process_check(result)
-        self.metrics.record(result, evaluation)
-        self.touch_heartbeat()
-        self._log_evaluation(result, evaluation)
-        self.remediation_coordinator.handle_evaluation(evaluation)
-        if self.nagios_prober is not None:
-            await self.nagios_prober.probe_once()
-        return evaluation
+        try:
+            result = await self.health_checker.check()
+            evaluation = self.incident_manager.process_check(result)
+            self.metrics.record(result, evaluation)
+            self._log_evaluation(result, evaluation)
+            self.remediation_coordinator.handle_evaluation(evaluation)
+            if self.nagios_prober is not None:
+                await self.nagios_prober.probe_once()
+            return evaluation
+        finally:
+            self.touch_heartbeat()
 
     async def run_forever(self, stop_event: asyncio.Event) -> None:
         """Run periodic health checks until `stop_event` is set."""
@@ -116,19 +126,57 @@ class MonitoringEngine:
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001
+                self.touch_heartbeat()
                 logger.exception(
                     "Unexpected exception during monitoring cycle",
                     extra={"event": "monitor_cycle_error"},
                 )
             await self._wait_or_stop(stop_event, self.settings.monitor_interval)
 
+
     async def shutdown(self) -> None:
-        """Release HTTP resources and drain active remediation tasks cleanly."""
-        await self.remediation_coordinator.shutdown()
-        await self.health_checker.close()
+        """Release all resources even if an individual cleanup operation fails."""
+        cleanup_operations = [
+            ("remediation_coordinator", self.remediation_coordinator.shutdown),
+            ("health_checker", self.health_checker.close),
+        ]
+
         if self.nagios_prober is not None:
-            await self.nagios_prober.close()
-        logger.info("AutoHeal monitoring engine shut down", extra={"event": "monitor_stopped"})
+            cleanup_operations.append(
+                ("nagios_prober", self.nagios_prober.close)
+            )
+
+        errors = []
+
+        for component, cleanup in cleanup_operations:
+            try:
+                await cleanup()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                errors.append((component, exc))
+                logger.exception(
+                    "Failed to clean up monitoring resource",
+                    extra={
+                        "event": "monitor_cleanup_error",
+                        "component": component,
+                    },
+                )
+
+        logger.info(
+            "AutoHeal monitoring engine shut down",
+            extra={"event": "monitor_stopped"},
+        )
+
+        if errors:
+            details = ", ".join(
+                f"{component}: {error}"
+                for component, error in errors
+            )
+            raise RuntimeError(
+                f"Monitoring shutdown encountered {len(errors)} error(s): {details}"
+            ) from errors[0][1]
+
 
     @staticmethod
     async def _wait_or_stop(stop_event: asyncio.Event, delay: float) -> None:
